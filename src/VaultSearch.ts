@@ -59,70 +59,74 @@ export class VaultSearch {
     this.idf.clear();
     this.docContents.clear();
 
-    const files = this.app.vault.getMarkdownFiles();
-    const total = files.length;
-    const df: Map<string, number> = new Map(); // term -> doc count
+    try {
+      const files = this.app.vault.getMarkdownFiles();
+      const total = files.length;
+      const df: Map<string, number> = new Map(); // term -> doc count
 
-    // Step 1: Read all files, compute TF
-    const tfs: Map<string, Map<string, number>> = new Map();
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      if (this.onProgress && i % 100 === 0) this.onProgress(i, total);
-      try {
-        const raw = await this.app.vault.cachedRead(file);
-        const clean = this.cleanContent(raw);
-        this.docContents.set(file.path, clean);
+      // Step 1: Read all files, compute TF
+      const tfs: Map<string, Map<string, number>> = new Map();
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (this.onProgress && i % 100 === 0) this.onProgress(i, total);
+        try {
+          const raw = await this.app.vault.cachedRead(file);
+          const clean = this.cleanContent(raw);
+          this.docContents.set(file.path, clean);
 
-        const tokens = this.tokenize(clean + " " + file.basename);
-        const tf: Map<string, number> = new Map();
-        for (const t of tokens) {
-          tf.set(t, (tf.get(t) ?? 0) + 1);
-        }
-        // Normalize TF
-        const maxTf = Math.max(...tf.values(), 1);
-        const normalizedTf: Map<string, number> = new Map();
-        for (const [t, count] of tf) {
-          normalizedTf.set(t, count / maxTf);
-        }
-        tfs.set(file.path, normalizedTf);
+          const tokens = this.tokenize(clean + " " + file.basename);
+          const tf: Map<string, number> = new Map();
+          for (const t of tokens) {
+            tf.set(t, (tf.get(t) ?? 0) + 1);
+          }
+          // Normalize TF
+          const maxTf = Math.max(...tf.values(), 1);
+          const normalizedTf: Map<string, number> = new Map();
+          for (const [t, count] of tf) {
+            normalizedTf.set(t, count / maxTf);
+          }
+          tfs.set(file.path, normalizedTf);
 
-        // Update DF
-        for (const t of tf.keys()) {
-          df.set(t, (df.get(t) ?? 0) + 1);
-        }
-      } catch {
-        // skip unreadable files
-      }
-    }
-
-    // Step 2: Compute IDF and TF-IDF vectors
-    const N = files.length;
-    for (const [term, docCount] of df) {
-      this.idf.set(term, Math.log(N / docCount + 1));
-    }
-
-    for (const [path, tf] of tfs) {
-      const vec: Map<string, number> = new Map();
-      let norm = 0;
-      for (const [term, tfVal] of tf) {
-        const idfVal = this.idf.get(term) ?? 0;
-        const tfidf = tfVal * idfVal;
-        vec.set(term, tfidf);
-        norm += tfidf * tfidf;
-      }
-      // L2 normalize
-      norm = Math.sqrt(norm);
-      if (norm > 0) {
-        for (const [term, val] of vec) {
-          vec.set(term, val / norm);
+          // Update DF
+          for (const t of tf.keys()) {
+            df.set(t, (df.get(t) ?? 0) + 1);
+          }
+        } catch {
+          // skip unreadable files
         }
       }
-      this.docVectors.set(path, vec);
-    }
 
-    this.indexed = true;
-    this.indexing = false;
-    if (this.onProgress) this.onProgress(total, total);
+      // Step 2: Compute IDF and TF-IDF vectors
+      const N = files.length;
+      for (const [term, docCount] of df) {
+        this.idf.set(term, Math.log(N / docCount + 1));
+      }
+
+      for (const [path, tf] of tfs) {
+        const vec: Map<string, number> = new Map();
+        let norm = 0;
+        for (const [term, tfVal] of tf) {
+          const idfVal = this.idf.get(term) ?? 0;
+          const tfidf = tfVal * idfVal;
+          vec.set(term, tfidf);
+          norm += tfidf * tfidf;
+        }
+        // L2 normalize
+        norm = Math.sqrt(norm);
+        if (norm > 0) {
+          for (const [term, val] of vec) {
+            vec.set(term, val / norm);
+          }
+        }
+        this.docVectors.set(path, vec);
+      }
+
+      this.indexed = true;
+      if (this.onProgress) this.onProgress(total, total);
+    } finally {
+      // Always reset indexing so retries are possible if an error occurred
+      this.indexing = false;
+    }
   }
 
   isIndexed(): boolean {

@@ -510,60 +510,63 @@ var VaultSearch = class {
     this.docVectors.clear();
     this.idf.clear();
     this.docContents.clear();
-    const files = this.app.vault.getMarkdownFiles();
-    const total = files.length;
-    const df = /* @__PURE__ */ new Map();
-    const tfs = /* @__PURE__ */ new Map();
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      if (this.onProgress && i % 100 === 0)
-        this.onProgress(i, total);
-      try {
-        const raw = await this.app.vault.cachedRead(file);
-        const clean = this.cleanContent(raw);
-        this.docContents.set(file.path, clean);
-        const tokens = this.tokenize(clean + " " + file.basename);
-        const tf = /* @__PURE__ */ new Map();
-        for (const t of tokens) {
-          tf.set(t, ((_a = tf.get(t)) != null ? _a : 0) + 1);
-        }
-        const maxTf = Math.max(...tf.values(), 1);
-        const normalizedTf = /* @__PURE__ */ new Map();
-        for (const [t, count] of tf) {
-          normalizedTf.set(t, count / maxTf);
-        }
-        tfs.set(file.path, normalizedTf);
-        for (const t of tf.keys()) {
-          df.set(t, ((_b = df.get(t)) != null ? _b : 0) + 1);
-        }
-      } catch (e) {
-      }
-    }
-    const N = files.length;
-    for (const [term, docCount] of df) {
-      this.idf.set(term, Math.log(N / docCount + 1));
-    }
-    for (const [path, tf] of tfs) {
-      const vec = /* @__PURE__ */ new Map();
-      let norm = 0;
-      for (const [term, tfVal] of tf) {
-        const idfVal = (_c = this.idf.get(term)) != null ? _c : 0;
-        const tfidf = tfVal * idfVal;
-        vec.set(term, tfidf);
-        norm += tfidf * tfidf;
-      }
-      norm = Math.sqrt(norm);
-      if (norm > 0) {
-        for (const [term, val] of vec) {
-          vec.set(term, val / norm);
+    try {
+      const files = this.app.vault.getMarkdownFiles();
+      const total = files.length;
+      const df = /* @__PURE__ */ new Map();
+      const tfs = /* @__PURE__ */ new Map();
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (this.onProgress && i % 100 === 0)
+          this.onProgress(i, total);
+        try {
+          const raw = await this.app.vault.cachedRead(file);
+          const clean = this.cleanContent(raw);
+          this.docContents.set(file.path, clean);
+          const tokens = this.tokenize(clean + " " + file.basename);
+          const tf = /* @__PURE__ */ new Map();
+          for (const t of tokens) {
+            tf.set(t, ((_a = tf.get(t)) != null ? _a : 0) + 1);
+          }
+          const maxTf = Math.max(...tf.values(), 1);
+          const normalizedTf = /* @__PURE__ */ new Map();
+          for (const [t, count] of tf) {
+            normalizedTf.set(t, count / maxTf);
+          }
+          tfs.set(file.path, normalizedTf);
+          for (const t of tf.keys()) {
+            df.set(t, ((_b = df.get(t)) != null ? _b : 0) + 1);
+          }
+        } catch (e) {
         }
       }
-      this.docVectors.set(path, vec);
+      const N = files.length;
+      for (const [term, docCount] of df) {
+        this.idf.set(term, Math.log(N / docCount + 1));
+      }
+      for (const [path, tf] of tfs) {
+        const vec = /* @__PURE__ */ new Map();
+        let norm = 0;
+        for (const [term, tfVal] of tf) {
+          const idfVal = (_c = this.idf.get(term)) != null ? _c : 0;
+          const tfidf = tfVal * idfVal;
+          vec.set(term, tfidf);
+          norm += tfidf * tfidf;
+        }
+        norm = Math.sqrt(norm);
+        if (norm > 0) {
+          for (const [term, val] of vec) {
+            vec.set(term, val / norm);
+          }
+        }
+        this.docVectors.set(path, vec);
+      }
+      this.indexed = true;
+      if (this.onProgress)
+        this.onProgress(total, total);
+    } finally {
+      this.indexing = false;
     }
-    this.indexed = true;
-    this.indexing = false;
-    if (this.onProgress)
-      this.onProgress(total, total);
   }
   isIndexed() {
     return this.indexed;
@@ -865,11 +868,11 @@ var MemexChatPlugin = class extends import_obsidian4.Plugin {
       }
     });
     this.addSettingTab(new MemexChatSettingsTab(this.app, this));
-    setTimeout(() => {
+    this.app.workspace.onLayoutReady(() => {
       if (!this.search.isIndexed()) {
         this.search.buildIndex().catch(console.error);
       }
-    }, 3e3);
+    });
     console.log("[Memex Chat] Plugin geladen");
   }
   onunload() {

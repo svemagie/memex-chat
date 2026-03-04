@@ -73,12 +73,12 @@ export default class MemexChatPlugin extends Plugin {
     // Settings tab
     this.addSettingTab(new MemexChatSettingsTab(this.app, this));
 
-    // Build index in background after startup
-    setTimeout(() => {
+    // Build index once the workspace layout (and vault cache) is fully ready
+    this.app.workspace.onLayoutReady(() => {
       if (!this.search.isIndexed()) {
         this.search.buildIndex().catch(console.error);
       }
-    }, 3000);
+    });
 
     console.log("[Memex Chat] Plugin geladen");
   }
