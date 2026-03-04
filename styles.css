@@ -197,9 +197,14 @@
   border-radius: 12px;
   font-size: 13px;
   line-height: 1.55;
-  user-select: text;
-  -webkit-user-select: text;
+  user-select: text !important;
+  -webkit-user-select: text !important;
   cursor: text;
+}
+
+.vc-bubble * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
 
 .vc-msg--user .vc-bubble {
