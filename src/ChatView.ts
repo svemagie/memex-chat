@@ -406,8 +406,10 @@ export class ChatView extends ItemView {
   }
 
   private async openContextPicker(): Promise<void> {
-    // Simple quick switcher-style: search and add to explicit context
-    const query = this.inputEl.value.trim() || "Notiz";
+    const lastUserMsg = [...(this.activeThread?.messages ?? [])]
+      .reverse()
+      .find((m) => m.role === "user")?.content ?? "";
+    const query = this.inputEl.value.trim() || lastUserMsg;
     this.setStatus("Suche Notizen…");
     try {
       if (!this.plugin.search.isIndexed()) await this.plugin.search.buildIndex();

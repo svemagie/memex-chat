@@ -325,7 +325,9 @@ ${content}`;
     this.setStatus("");
   }
   async openContextPicker() {
-    const query = this.inputEl.value.trim() || "Notiz";
+    var _a, _b, _c, _d;
+    const lastUserMsg = (_d = (_c = [...(_b = (_a = this.activeThread) == null ? void 0 : _a.messages) != null ? _b : []].reverse().find((m) => m.role === "user")) == null ? void 0 : _c.content) != null ? _d : "";
+    const query = this.inputEl.value.trim() || lastUserMsg;
     this.setStatus("Suche Notizen\u2026");
     try {
       if (!this.plugin.search.isIndexed())
