@@ -498,6 +498,38 @@
   background: var(--background-modifier-hover);
 }
 
+/* Message action buttons (Copy, Save as Note) */
+.vc-msg-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.vc-msg--assistant:hover .vc-msg-actions {
+  opacity: 1;
+}
+
+.vc-msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.vc-msg-action-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
 /* Context Preview */
 .vc-context-preview {
   padding: 8px 12px;

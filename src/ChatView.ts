@@ -420,6 +420,7 @@ export class ChatView extends ItemView {
       const stream = this.plugin.claude.streamChat(claudeMessages, {
         apiKey: this.plugin.settings.apiKey,
         model: this.plugin.settings.model,
+        maxTokens: this.plugin.settings.maxTokens,
         systemPrompt,
       });
 
@@ -660,6 +661,50 @@ export class ChatView extends ItemView {
         const link = sources.createEl("span", { text: `[[${name}]]`, cls: "vc-source-link" });
         link.onclick = () => this.app.workspace.openLinkText(notePath, "", "tab");
       }
+    }
+
+    // Action buttons for finished assistant messages
+    if (!msg.isStreaming && msg.role === "assistant") {
+      const actions = msgEl.createDiv("vc-msg-actions");
+
+      // Copy button
+      const copyBtn = actions.createEl("button", { cls: "vc-msg-action-btn", title: "Antwort kopieren" });
+      copyBtn.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke-width="2"/></svg> Kopieren`;
+      copyBtn.onclick = async () => {
+        await navigator.clipboard.writeText(msg.content);
+        copyBtn.textContent = "✓ Kopiert";
+        setTimeout(() => {
+          copyBtn.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke-width="2"/></svg> Kopieren`;
+        }, 2000);
+      };
+
+      // Save as note button
+      const saveBtn = actions.createEl("button", { cls: "vc-msg-action-btn", title: "Als neue Notiz speichern" });
+      saveBtn.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" stroke-width="2"/><polyline points="17 21 17 13 7 13 7 21" stroke-width="2"/><polyline points="7 3 7 8 15 8" stroke-width="2"/></svg> Als Notiz`;
+      saveBtn.onclick = async () => {
+        await this.saveResponseAsNote(msg.content);
+      };
+    }
+  }
+
+  private async saveResponseAsNote(content: string): Promise<void> {
+    const date = new Date().toISOString().slice(0, 10);
+    // Use first non-empty line as title (max 60 chars, strip markdown headers)
+    const firstLine = content.split("\n").find((l) => l.trim()) ?? "Claude Antwort";
+    const title = firstLine.replace(/^#+\s*/, "").replace(/[\\/:*?"<>|]/g, " ").slice(0, 60).trim();
+    const noteContent = `---\ncreated: ${date}\ntags: [chat, claude]\n---\n\n${content}`;
+    try {
+      // Use Obsidian's configured default new-note folder
+      const folder = this.app.fileManager.getNewFileParent("");
+      const folderPath = folder.path === "/" ? "" : folder.path + "/";
+      const fileName = `${folderPath}${date} ${title}.md`;
+      const existing = this.app.vault.getAbstractFileByPath(fileName);
+      const file = existing instanceof TFile
+        ? await this.app.vault.modify(existing, noteContent).then(() => existing)
+        : await this.app.vault.create(fileName, noteContent);
+      this.app.workspace.openLinkText(file.path, "", "tab");
+    } catch (e) {
+      this.setStatus("⚠ Fehler beim Speichern: " + e.message);
     }
   }
 

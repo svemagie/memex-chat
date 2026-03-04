@@ -337,6 +337,7 @@ ${content}`;
       const stream = this.plugin.claude.streamChat(claudeMessages, {
         apiKey: this.plugin.settings.apiKey,
         model: this.plugin.settings.model,
+        maxTokens: this.plugin.settings.maxTokens,
         systemPrompt
       });
       for await (const chunk of stream) {
@@ -555,6 +556,45 @@ ${content}`;
         const link = sources.createEl("span", { text: `[[${name}]]`, cls: "vc-source-link" });
         link.onclick = () => this.app.workspace.openLinkText(notePath, "", "tab");
       }
+    }
+    if (!msg.isStreaming && msg.role === "assistant") {
+      const actions = msgEl.createDiv("vc-msg-actions");
+      const copyBtn = actions.createEl("button", { cls: "vc-msg-action-btn", title: "Antwort kopieren" });
+      copyBtn.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke-width="2"/></svg> Kopieren`;
+      copyBtn.onclick = async () => {
+        await navigator.clipboard.writeText(msg.content);
+        copyBtn.textContent = "\u2713 Kopiert";
+        setTimeout(() => {
+          copyBtn.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke-width="2"/></svg> Kopieren`;
+        }, 2e3);
+      };
+      const saveBtn = actions.createEl("button", { cls: "vc-msg-action-btn", title: "Als neue Notiz speichern" });
+      saveBtn.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" stroke-width="2"/><polyline points="17 21 17 13 7 13 7 21" stroke-width="2"/><polyline points="7 3 7 8 15 8" stroke-width="2"/></svg> Als Notiz`;
+      saveBtn.onclick = async () => {
+        await this.saveResponseAsNote(msg.content);
+      };
+    }
+  }
+  async saveResponseAsNote(content) {
+    var _a;
+    const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    const firstLine = (_a = content.split("\n").find((l) => l.trim())) != null ? _a : "Claude Antwort";
+    const title = firstLine.replace(/^#+\s*/, "").replace(/[\\/:*?"<>|]/g, " ").slice(0, 60).trim();
+    const noteContent = `---
+created: ${date}
+tags: [chat, claude]
+---
+
+${content}`;
+    try {
+      const folder = this.app.fileManager.getNewFileParent("");
+      const folderPath = folder.path === "/" ? "" : folder.path + "/";
+      const fileName = `${folderPath}${date} ${title}.md`;
+      const existing = this.app.vault.getAbstractFileByPath(fileName);
+      const file = existing instanceof import_obsidian.TFile ? await this.app.vault.modify(existing, noteContent).then(() => existing) : await this.app.vault.create(fileName, noteContent);
+      this.app.workspace.openLinkText(file.path, "", "tab");
+    } catch (e) {
+      this.setStatus("\u26A0 Fehler beim Speichern: " + e.message);
     }
   }
   updateLastMessage(content) {
@@ -1140,7 +1180,7 @@ var ClaudeClient = class {
       headers: this.headers(options.apiKey),
       body: JSON.stringify({
         model: options.model,
-        max_tokens: (_a = options.maxTokens) != null ? _a : 2048,
+        max_tokens: (_a = options.maxTokens) != null ? _a : 8192,
         system: options.systemPrompt,
         messages
       }),
@@ -1163,7 +1203,7 @@ var ClaudeClient = class {
       headers: this.headers(options.apiKey),
       body: JSON.stringify({
         model: options.model,
-        max_tokens: (_a = options.maxTokens) != null ? _a : 2048,
+        max_tokens: (_a = options.maxTokens) != null ? _a : 8192,
         system: options.systemPrompt,
         messages
       }),
@@ -1181,6 +1221,7 @@ var import_obsidian3 = require("obsidian");
 var DEFAULT_SETTINGS = {
   apiKey: "",
   model: "claude-opus-4-5-20251101",
+  maxTokens: 8192,
   maxContextNotes: 6,
   maxCharsPerNote: 2500,
   systemPrompt: `Du bist ein hilfreicher Assistent mit Zugriff auf die pers\xF6nliche Wissensdatenbank des Nutzers (Obsidian Vault).
@@ -1241,6 +1282,12 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
+    new import_obsidian3.Setting(containerEl).setName("Max. Antwort-Tokens").setDesc("Maximale L\xE4nge der Claude-Antwort. F\xFCr lange Analysen (z.B. Monthly Check) h\xF6her einstellen. (1024\u201316000)").addSlider(
+      (slider) => slider.setLimits(1024, 16e3, 512).setValue(this.plugin.settings.maxTokens).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.maxTokens = value;
+        await this.plugin.saveSettings();
+      })
+    );
     new import_obsidian3.Setting(containerEl).setName("Senden mit Enter").setDesc("Ein: Enter sendet. Aus: Cmd+Enter sendet (Enter = neue Zeile)").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.sendOnEnter).onChange(async (value) => {
         this.plugin.settings.sendOnEnter = value;

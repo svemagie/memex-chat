@@ -12,6 +12,7 @@ export interface PromptButton {
 export interface MemexChatSettings {
   apiKey: string;
   model: string;
+  maxTokens: number;
   maxContextNotes: number;
   maxCharsPerNote: number;
   systemPrompt: string;
@@ -28,6 +29,7 @@ export interface MemexChatSettings {
 export const DEFAULT_SETTINGS: MemexChatSettings = {
   apiKey: "",
   model: "claude-opus-4-5-20251101",
+  maxTokens: 8192,
   maxContextNotes: 6,
   maxCharsPerNote: 2500,
   systemPrompt: `Du bist ein hilfreicher Assistent mit Zugriff auf die persönliche Wissensdatenbank des Nutzers (Obsidian Vault).
@@ -106,6 +108,20 @@ export class MemexChatSettingsTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+
+    new Setting(containerEl)
+      .setName("Max. Antwort-Tokens")
+      .setDesc("Maximale Länge der Claude-Antwort. Für lange Analysen (z.B. Monthly Check) höher einstellen. (1024–16000)")
+      .addSlider((slider) =>
+        slider
+          .setLimits(1024, 16000, 512)
+          .setValue(this.plugin.settings.maxTokens)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.maxTokens = value;
+            await this.plugin.saveSettings();
+          })
+      );
 
     new Setting(containerEl)
       .setName("Senden mit Enter")

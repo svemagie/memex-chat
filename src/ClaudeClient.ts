@@ -45,7 +45,7 @@ export class ClaudeClient {
       headers: this.headers(options.apiKey),
       body: JSON.stringify({
         model: options.model,
-        max_tokens: options.maxTokens ?? 2048,
+        max_tokens: options.maxTokens ?? 8192,
         system: options.systemPrompt,
         messages,
       }),
@@ -70,7 +70,7 @@ export class ClaudeClient {
       headers: this.headers(options.apiKey),
       body: JSON.stringify({
         model: options.model,
-        max_tokens: options.maxTokens ?? 2048,
+        max_tokens: options.maxTokens ?? 8192,
         system: options.systemPrompt,
         messages,
       }),
