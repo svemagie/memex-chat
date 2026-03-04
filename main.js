@@ -96,7 +96,7 @@ var ChatView = class extends import_obsidian.ItemView {
     this.contextPreviewEl.style.display = "none";
     const inputArea = chatArea.createDiv("vc-input-area");
     const inputWrapper = inputArea.createDiv("vc-input-wrapper");
-    this.mentionDropdownEl = inputWrapper.createDiv("vc-mention-dropdown");
+    this.mentionDropdownEl = root.createDiv("vc-mention-dropdown");
     this.mentionDropdownEl.style.display = "none";
     this.inputEl = inputWrapper.createEl("textarea", {
       cls: "vc-input",
@@ -133,7 +133,11 @@ var ChatView = class extends import_obsidian.ItemView {
           return;
         }
       }
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      const sendOnEnter = this.plugin.settings.sendOnEnter;
+      if (sendOnEnter && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        this.handleSend();
+      } else if (!sendOnEnter && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         this.handleSend();
       }
@@ -466,7 +470,14 @@ ${content}`;
     }
     this.mentionSelectedIdx = 0;
     this.renderMentionDropdown();
-    this.mentionDropdownEl.style.display = "block";
+    const rect = this.inputEl.getBoundingClientRect();
+    const el = this.mentionDropdownEl;
+    el.style.position = "fixed";
+    el.style.left = rect.left + "px";
+    el.style.width = rect.width + "px";
+    el.style.top = "auto";
+    el.style.bottom = window.innerHeight - rect.top + 4 + "px";
+    el.style.display = "block";
   }
   renderMentionDropdown() {
     this.mentionDropdownEl.empty();
@@ -723,8 +734,8 @@ var VaultSearch = class {
     let bestPos = 0;
     let bestScore = 0;
     for (let i = 0; i < content.length - maxLen; i += 50) {
-      const window = lower.slice(i, i + maxLen);
-      const score = queryWords.filter((w) => window.includes(w)).length;
+      const window2 = lower.slice(i, i + maxLen);
+      const score = queryWords.filter((w) => window2.includes(w)).length;
       if (score > bestScore) {
         bestScore = score;
         bestPos = i;
@@ -819,7 +830,8 @@ Wenn du Fragen beantwortest:
   autoRetrieveContext: true,
   showContextPreview: true,
   saveThreadsToVault: true,
-  threadsFolder: "Calendar/Chat"
+  threadsFolder: "Calendar/Chat",
+  sendOnEnter: false
 };
 var MODELS = [
   { id: "claude-opus-4-5-20251101", name: "Claude Opus 4.5 (St\xE4rkst)" },
@@ -851,6 +863,12 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
+    new import_obsidian3.Setting(containerEl).setName("Senden mit Enter").setDesc("Ein: Enter sendet. Aus: Cmd+Enter sendet (Enter = neue Zeile)").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.sendOnEnter).onChange(async (value) => {
+        this.plugin.settings.sendOnEnter = value;
+        await this.plugin.saveSettings();
+      })
+    );
     containerEl.createEl("h3", { text: "Kontext-Einstellungen" });
     new import_obsidian3.Setting(containerEl).setName("Max. Kontext-Notizen").setDesc("Wie viele Notizen werden automatisch als Kontext hinzugef\xFCgt? (1\u201315)").addSlider(
       (slider) => slider.setLimits(1, 15, 1).setValue(this.plugin.settings.maxContextNotes).setDynamicTooltip().onChange(async (value) => {

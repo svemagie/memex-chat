@@ -11,6 +11,7 @@ export interface MemexChatSettings {
   showContextPreview: boolean;
   saveThreadsToVault: boolean;
   threadsFolder: string;
+  sendOnEnter: boolean;
 }
 
 export const DEFAULT_SETTINGS: MemexChatSettings = {
@@ -30,6 +31,7 @@ Wenn du Fragen beantwortest:
   showContextPreview: true,
   saveThreadsToVault: true,
   threadsFolder: "Calendar/Chat",
+  sendOnEnter: false,
 };
 
 export const MODELS = [
@@ -79,6 +81,16 @@ export class MemexChatSettingsTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+
+    new Setting(containerEl)
+      .setName("Senden mit Enter")
+      .setDesc("Ein: Enter sendet. Aus: Cmd+Enter sendet (Enter = neue Zeile)")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.sendOnEnter).onChange(async (value) => {
+          this.plugin.settings.sendOnEnter = value;
+          await this.plugin.saveSettings();
+        })
+      );
 
     // --- Context ---
     containerEl.createEl("h3", { text: "Kontext-Einstellungen" });

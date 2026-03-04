@@ -128,7 +128,8 @@ export class ChatView extends ItemView {
     const inputArea = chatArea.createDiv("vc-input-area");
 
     const inputWrapper = inputArea.createDiv("vc-input-wrapper");
-    this.mentionDropdownEl = inputWrapper.createDiv("vc-mention-dropdown");
+    // Dropdown appended to root to escape overflow:hidden ancestors
+    this.mentionDropdownEl = root.createDiv("vc-mention-dropdown");
     this.mentionDropdownEl.style.display = "none";
     this.inputEl = inputWrapper.createEl("textarea", {
       cls: "vc-input",
@@ -170,7 +171,11 @@ export class ChatView extends ItemView {
           return;
         }
       }
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      const sendOnEnter = this.plugin.settings.sendOnEnter;
+      if (sendOnEnter && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        this.handleSend();
+      } else if (!sendOnEnter && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         this.handleSend();
       }
@@ -570,7 +575,16 @@ export class ChatView extends ItemView {
 
     this.mentionSelectedIdx = 0;
     this.renderMentionDropdown();
-    this.mentionDropdownEl.style.display = "block";
+
+    // Position using fixed coords to escape overflow:hidden ancestors
+    const rect = this.inputEl.getBoundingClientRect();
+    const el = this.mentionDropdownEl;
+    el.style.position = "fixed";
+    el.style.left = rect.left + "px";
+    el.style.width = rect.width + "px";
+    el.style.top = "auto";
+    el.style.bottom = (window.innerHeight - rect.top + 4) + "px";
+    el.style.display = "block";
   }
 
   private renderMentionDropdown(): void {
