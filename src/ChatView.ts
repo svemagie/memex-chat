@@ -35,6 +35,7 @@ export class ChatView extends ItemView {
   private messagesEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private contextPreviewEl!: HTMLElement;
+  private modeHintEl!: HTMLElement;
   private sendBtn!: HTMLButtonElement;
   private statusEl!: HTMLElement;
   private mentionDropdownEl!: HTMLElement;
@@ -42,6 +43,9 @@ export class ChatView extends ItemView {
   // Mention autocomplete state
   private mentionSelectedIdx = 0;
   private mentionMatches: string[] = [];
+
+  // Active prompt extension buttons (file paths)
+  private activeExtensions: Set<string> = new Set();
 
   constructor(leaf: WorkspaceLeaf, plugin: MemexChatPlugin) {
     super(leaf);
@@ -87,6 +91,23 @@ export class ChatView extends ItemView {
     // Header
     const header = root.createDiv("vc-header");
     header.createEl("span", { text: "Memex Chat", cls: "vc-header-title" });
+
+    // Prompt-extension mode buttons (centre)
+    const modeBtns = header.createDiv("vc-header-modes");
+    for (const pb of this.plugin.settings.promptButtons) {
+      const modeBtn = modeBtns.createEl("button", { text: pb.label, cls: "vc-mode-btn" });
+      modeBtn.onclick = () => {
+        if (this.activeExtensions.has(pb.filePath)) {
+          this.activeExtensions.delete(pb.filePath);
+          modeBtn.removeClass("vc-mode-btn--active");
+        } else {
+          this.activeExtensions.add(pb.filePath);
+          modeBtn.addClass("vc-mode-btn--active");
+        }
+        this.updateModeHint();
+      };
+    }
+
     const headerActions = header.createDiv("vc-header-actions");
 
     const newThreadBtn = headerActions.createEl("button", { cls: "vc-icon-btn", title: "Neuer Thread" });
@@ -127,13 +148,17 @@ export class ChatView extends ItemView {
     // Input area
     const inputArea = chatArea.createDiv("vc-input-area");
 
+    // Mode hint panel (inside input area, above textarea)
+    this.modeHintEl = inputArea.createDiv("vc-mode-hint");
+    this.modeHintEl.style.display = "none";
+
     const inputWrapper = inputArea.createDiv("vc-input-wrapper");
     // Dropdown appended to root to escape overflow:hidden ancestors
     this.mentionDropdownEl = root.createDiv("vc-mention-dropdown");
     this.mentionDropdownEl.style.display = "none";
     this.inputEl = inputWrapper.createEl("textarea", {
       cls: "vc-input",
-      attr: { placeholder: "Frage stellen… (@ für Notiz einfügen)" },
+      attr: { placeholder: "Frage stellen… (@ für Notiz)" },
     });
     this.inputEl.rows = 3;
 
@@ -171,13 +196,14 @@ export class ChatView extends ItemView {
           return;
         }
       }
-      const sendOnEnter = this.plugin.settings.sendOnEnter;
-      if (sendOnEnter && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
-        e.preventDefault();
-        this.handleSend();
-      } else if (!sendOnEnter && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        this.handleSend();
+      if (e.key === "Enter") {
+        const isCmdEnter = e.metaKey || e.ctrlKey;
+        const sendOnEnter = this.plugin.settings.sendOnEnter;
+        if (isCmdEnter || (sendOnEnter && !e.shiftKey)) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.handleSend();
+        }
       }
     });
 
@@ -234,25 +260,41 @@ export class ChatView extends ItemView {
       return;
     }
 
-    // Parse @[[mentions]] from input
-    const mentionPattern = /\[\[([^\]]+)\]\]/g;
+    // Parse @Notizname mentions from input
+    const mentionPattern = /@([\w\däöüÄÖÜß][^@\n]{1,}?)(?=\s|$)/g;
     const mentions: TFile[] = [];
     let match;
     while ((match = mentionPattern.exec(query)) !== null) {
-      const name = match[1];
+      const name = match[1].trim();
       const file = this.app.metadataCache.getFirstLinkpathDest(name, "");
       if (file) mentions.push(file);
     }
 
-    // If context preview is enabled and auto-retrieve is on, fetch context first
-    if (this.plugin.settings.autoRetrieveContext && this.plugin.settings.showContextPreview) {
-      if (this.pendingContext.length === 0 && this.explicitContext.length === 0) {
-        await this.fetchAndShowContext(query, mentions);
-        return; // wait for user to confirm/modify context
+    // With active prompt extensions, skip auto-retrieve and clear any leftover context
+    if (this.activeExtensions.size === 0) {
+      if (this.plugin.settings.autoRetrieveContext && this.plugin.settings.showContextPreview) {
+        if (this.pendingContext.length === 0 && this.explicitContext.length === 0) {
+          await this.fetchAndShowContext(query, mentions);
+          return; // wait for user to confirm/modify context
+        }
+      }
+    } else {
+      this.pendingContext = [];
+      this.explicitContext = [];
+    }
+
+    // Date-based context for active date-search buttons
+    const dateFiles: TFile[] = [];
+    for (const pb of this.plugin.settings.promptButtons) {
+      if (pb.searchMode === "date" && this.activeExtensions.has(pb.filePath)) {
+        const { start, end, label } = this.parseDateRange(query);
+        const found = this.findFilesByDate(start, end, pb.searchFolders ?? []);
+        dateFiles.push(...found);
+        this.setStatus(`${found.length} Texte aus ${label} gefunden`);
       }
     }
 
-    await this.sendMessage(query, mentions);
+    await this.sendMessage(query, [...mentions, ...dateFiles]);
   }
 
   private async fetchAndShowContext(query: string, mentions: TFile[]): Promise<void> {
@@ -349,11 +391,24 @@ export class ChatView extends ItemView {
 
     this.setStatus("Claude denkt…");
 
+    // Build effective system prompt (base + any active extensions)
+    let systemPrompt = this.plugin.settings.systemPrompt;
+    for (const filePath of this.activeExtensions) {
+      const file =
+        this.app.metadataCache.getFirstLinkpathDest(filePath, "") ??
+        (this.app.vault.getAbstractFileByPath(filePath + ".md") as TFile | null) ??
+        (this.app.vault.getAbstractFileByPath(filePath) as TFile | null);
+      if (file instanceof TFile) {
+        const ext = await this.app.vault.cachedRead(file);
+        systemPrompt += "\n\n---\n" + ext;
+      }
+    }
+
     try {
       const stream = this.plugin.claude.streamChat(claudeMessages, {
         apiKey: this.plugin.settings.apiKey,
         model: this.plugin.settings.model,
-        systemPrompt: this.plugin.settings.systemPrompt,
+        systemPrompt,
       });
 
       for await (const chunk of stream) {
@@ -415,7 +470,7 @@ export class ChatView extends ItemView {
 
       const itemHeader = item.createDiv("vc-ctx-item-header");
       const titleEl = itemHeader.createEl("span", { text: result.title, cls: "vc-ctx-item-title" });
-      titleEl.onclick = () => this.app.workspace.openLinkText(result.file.path, "", false);
+      titleEl.onclick = () => this.app.workspace.openLinkText(result.file.path, "", "tab");
 
       itemHeader.createEl("span", { text: `${score}%`, cls: "vc-ctx-score" });
 
@@ -437,6 +492,28 @@ export class ChatView extends ItemView {
     this.pendingContext = [];
     this.explicitContext = [];
     this.setStatus("");
+  }
+
+  private updateModeHint(): void {
+    // Collect helpTexts from all active extensions that have one
+    const hints: string[] = [];
+    for (const pb of this.plugin.settings.promptButtons) {
+      if (this.activeExtensions.has(pb.filePath) && pb.helpText) {
+        hints.push(pb.helpText);
+      }
+    }
+    if (hints.length > 0) {
+      this.modeHintEl.empty();
+      for (const hint of hints) {
+        const div = this.modeHintEl.createDiv("vc-mode-hint-text");
+        div.textContent = hint;
+      }
+      this.modeHintEl.style.display = "block";
+      this.inputEl.placeholder = "";
+    } else {
+      this.modeHintEl.style.display = "none";
+      this.inputEl.placeholder = "Frage stellen… (@ für Notiz)";
+    }
   }
 
   private async openContextPicker(): Promise<void> {
@@ -464,6 +541,10 @@ export class ChatView extends ItemView {
       const item = this.threadListEl.createDiv("vc-thread-item" + (thread.id === this.activeThreadId ? " vc-thread-item--active" : ""));
       const titleEl = item.createEl("span", { text: thread.title, cls: "vc-thread-title" });
       titleEl.onclick = () => this.switchThread(thread.id);
+      titleEl.ondblclick = (e) => {
+        e.stopPropagation();
+        this.startRenameThread(thread, titleEl);
+      };
 
       const del = item.createEl("button", { cls: "vc-icon-btn vc-thread-del", title: "Löschen" });
       del.innerHTML = "✕";
@@ -472,6 +553,27 @@ export class ChatView extends ItemView {
         this.deleteThread(thread.id);
       };
     }
+    this.renderHistorySection();
+  }
+
+  private startRenameThread(thread: Thread, titleEl: HTMLElement): void {
+    const input = document.createElement("input");
+    input.className = "vc-thread-rename";
+    input.value = thread.title;
+    titleEl.replaceWith(input);
+    input.select();
+    const finish = () => {
+      const newTitle = input.value.trim() || thread.title;
+      thread.title = newTitle;
+      this.saveThreads();
+      this.renderThreadList();
+    };
+    input.addEventListener("blur", finish);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+      if (e.key === "Escape") { input.value = thread.title; input.blur(); }
+    });
+    input.focus();
   }
 
   private renderMessages(): void {
@@ -481,7 +583,7 @@ export class ChatView extends ItemView {
       const empty = this.messagesEl.createDiv("vc-empty");
       empty.createEl("div", { text: "💬", cls: "vc-empty-icon" });
       empty.createEl("div", { text: "Stell eine Frage — ich suche passende Notizen aus deinem Vault.", cls: "vc-empty-text" });
-      empty.createEl("div", { text: "Tipp: Nutze @[[Notizname]] um eine Notiz direkt einzubinden.", cls: "vc-empty-hint" });
+      empty.createEl("div", { text: "Tipp: Nutze @Notizname um eine Notiz direkt einzubinden.", cls: "vc-empty-hint" });
       return;
     }
 
@@ -506,6 +608,33 @@ export class ChatView extends ItemView {
         mdEl.createEl("span", { cls: "vc-cursor", text: "█" });
       } else {
         MarkdownRenderer.render(this.app, msg.content, mdEl, "", this.renderComponent);
+        // Wire up internal [[links]] to open / create notes
+        mdEl.querySelectorAll("a.internal-link").forEach((a) => {
+          const href = (a as HTMLAnchorElement).getAttribute("href") ?? a.textContent ?? "";
+          const exists = !!this.app.metadataCache.getFirstLinkpathDest(href, "");
+          if (!exists) {
+            a.classList.add("is-unresolved");
+            // Suggest similar existing notes
+            const similar = this.plugin.search.findSimilarByName(href, 2, 0.45);
+            if (similar.length > 0) {
+              const hint = (a.parentElement as HTMLElement).createEl("span", { cls: "vc-link-hint" });
+              hint.createEl("span", { text: " → Ähnliche Notiz: ", cls: "vc-link-hint-label" });
+              similar.forEach((r, i) => {
+                if (i > 0) hint.appendText(", ");
+                const link = hint.createEl("a", { text: r.title, cls: "internal-link vc-link-hint-target" });
+                link.addEventListener("click", (e) => {
+                  e.preventDefault();
+                  this.app.workspace.openLinkText(r.file.path, "", false);
+                });
+              });
+              a.insertAdjacentElement("afterend", hint);
+            }
+          }
+          a.addEventListener("click", (e) => {
+            e.preventDefault();
+            this.app.workspace.openLinkText(href, "", "tab");
+          });
+        });
       }
     }
 
@@ -517,7 +646,7 @@ export class ChatView extends ItemView {
         const file = this.app.vault.getAbstractFileByPath(notePath);
         const name = file instanceof TFile ? file.basename : notePath.split("/").pop() ?? notePath;
         const link = sources.createEl("span", { text: `[[${name}]]`, cls: "vc-source-link" });
-        link.onclick = () => this.app.workspace.openLinkText(notePath, "", false);
+        link.onclick = () => this.app.workspace.openLinkText(notePath, "", "tab");
       }
     }
   }
@@ -616,10 +745,10 @@ export class ChatView extends ItemView {
     const cursor = this.inputEl.selectionStart ?? 0;
     const text = this.inputEl.value;
     const textBefore = text.slice(0, cursor);
-    const match = textBefore.match(/@([^@\n[\]]{2,})$/);
+    const match = textBefore.match(/@([^@\n]{2,})$/);
     if (!match) return;
     const start = cursor - match[0].length;
-    const replacement = `[[${basename}]]`;
+    const replacement = `@${basename}`;
     this.inputEl.value = text.slice(0, start) + replacement + text.slice(cursor);
     const newCursor = start + replacement.length;
     this.inputEl.setSelectionRange(newCursor, newCursor);
@@ -631,6 +760,65 @@ export class ChatView extends ItemView {
     this.mentionDropdownEl.empty();
     this.mentionMatches = [];
     this.mentionSelectedIdx = 0;
+  }
+
+  // ─── Date-based context search ────────────────────────────────────────────
+
+  private parseDateRange(query: string): { start: Date; end: Date; label: string } {
+    const now = new Date();
+    const lower = query.toLowerCase();
+
+    // Relative: letzter / voriger Monat
+    if (/letzt[eaem]n?\s+monat|vorig[eaem]n?\s+monat/.test(lower)) {
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const end = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+      return { start, end, label: start.toLocaleDateString("de-DE", { month: "long", year: "numeric" }) };
+    }
+
+    // German month names (+ optional year)
+    const MONTHS: Record<string, number> = {
+      januar: 0, februar: 1, "märz": 2, april: 3, mai: 4, juni: 5,
+      juli: 6, august: 7, september: 8, oktober: 9, november: 10, dezember: 11,
+    };
+    for (const [name, idx] of Object.entries(MONTHS)) {
+      if (lower.includes(name)) {
+        const yearMatch = lower.match(/\b(20\d{2})\b/);
+        const year = yearMatch ? parseInt(yearMatch[1]) : now.getFullYear();
+        const start = new Date(year, idx, 1);
+        const end = new Date(year, idx + 1, 0, 23, 59, 59);
+        return { start, end, label: start.toLocaleDateString("de-DE", { month: "long", year: "numeric" }) };
+      }
+    }
+
+    // Default: current month
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    return { start, end, label: start.toLocaleDateString("de-DE", { month: "long", year: "numeric" }) };
+  }
+
+  private getFileDate(file: TFile): Date {
+    // 1. Filename starts with YYYY-MM-DD
+    const m = file.basename.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+    // 2. Frontmatter created / date / datum
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (fm) {
+      const raw = fm["created"] ?? fm["date"] ?? fm["datum"];
+      if (raw) { const d = new Date(raw); if (!isNaN(d.getTime())) return d; }
+    }
+    // 3. Filesystem ctime
+    return new Date(file.stat.ctime);
+  }
+
+  private findFilesByDate(start: Date, end: Date, folders: string[]): TFile[] {
+    const s = start.getTime();
+    const e = end.getTime();
+    return this.app.vault.getMarkdownFiles().filter((file) => {
+      if (folders.length > 0 && !folders.some((f) => file.path.startsWith(f.endsWith("/") ? f : f + "/")))
+        return false;
+      const t = this.getFileDate(file).getTime();
+      return t >= s && t <= e;
+    });
   }
 
   // ─── Persistence ─────────────────────────────────────────────────────────
@@ -653,7 +841,7 @@ export class ChatView extends ItemView {
       const safeName = thread.title.replace(/[\\/:*?"<>|]/g, " ").slice(0, 60);
       const fileName = `${folder}/${date} ${safeName}.md`;
 
-      let content = `---\ncreated: ${date}\ntags: [chat]\n---\n\n# ${thread.title}\n\n`;
+      let content = `---\ncreated: ${date}\nid: ${thread.id}\ntags: [chat]\n---\n\n# ${thread.title}\n\n`;
       for (const msg of thread.messages) {
         const role = msg.role === "user" ? "**Du**" : "**Claude**";
         content += `${role}: ${msg.content}\n\n`;
@@ -671,6 +859,144 @@ export class ChatView extends ItemView {
       }
     } catch {
       // silent fail
+    }
+  }
+
+  /** Parse a vault chat file back into a Thread object */
+  private async parseThreadFromVault(file: TFile): Promise<Thread | null> {
+    try {
+      const raw = await this.app.vault.cachedRead(file);
+      // Extract frontmatter id if present
+      let id: string | undefined;
+      const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+      if (fmMatch) {
+        const idMatch = fmMatch[1].match(/^id:\s*(.+)$/m);
+        if (idMatch) id = idMatch[1].trim();
+      }
+      // Extract title from first h1
+      const titleMatch = raw.match(/^# (.+)$/m);
+      const title = titleMatch ? titleMatch[1].trim() : file.basename;
+      // Extract messages
+      const messages: ChatMessage[] = [];
+      const body = fmMatch ? raw.slice(fmMatch[0].length) : raw;
+      const lines = body.split("\n");
+      let currentRole: "user" | "assistant" | null = null;
+      let currentContent: string[] = [];
+      const flush = () => {
+        if (currentRole && currentContent.length > 0) {
+          messages.push({
+            role: currentRole,
+            content: currentContent.join("\n").trim(),
+            timestamp: file.stat.ctime,
+          });
+        }
+        currentContent = [];
+        currentRole = null;
+      };
+      for (const line of lines) {
+        if (line.startsWith("**Du**: ")) {
+          flush();
+          currentRole = "user";
+          currentContent.push(line.slice("**Du**: ".length));
+        } else if (line.startsWith("**Claude**: ")) {
+          flush();
+          currentRole = "assistant";
+          currentContent.push(line.slice("**Claude**: ".length));
+        } else if (currentRole) {
+          if (line.startsWith("> Kontext:")) continue; // skip context lines
+          currentContent.push(line);
+        }
+      }
+      flush();
+      return {
+        id: id ?? file.stat.ctime.toString(),
+        title,
+        messages,
+        created: file.stat.ctime,
+        updated: file.stat.mtime,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Load saved vault files not already in this.threads */
+  private async loadHistoryFromVault(): Promise<Thread[]> {
+    const folder = this.plugin.settings.threadsFolder;
+    const loadedIds = new Set(this.threads.map((t) => t.id));
+    const results: Thread[] = [];
+    const files = this.app.vault.getMarkdownFiles()
+      .filter((f) => f.path.startsWith(folder + "/"))
+      .sort((a, b) => b.stat.mtime - a.stat.mtime);
+    for (const file of files) {
+      const thread = await this.parseThreadFromVault(file);
+      if (thread && !loadedIds.has(thread.id)) {
+        results.push(thread);
+        loadedIds.add(thread.id);
+      }
+    }
+    return results;
+  }
+
+  // ─── Sidebar History ──────────────────────────────────────────────────────
+
+  private historyExpanded = false;
+  private historyThreads: Thread[] = [];
+
+  async renderHistorySection(): Promise<void> {
+    // Remove existing history section if any
+    const existing = this.threadListEl.parentElement?.querySelector(".vc-history-section");
+    if (existing) existing.remove();
+
+    if (!this.plugin.settings.saveThreadsToVault) return;
+
+    const sidebar = this.threadListEl.parentElement as HTMLElement;
+    const section = sidebar.createDiv("vc-history-section");
+
+    const toggle = section.createDiv("vc-history-toggle");
+    toggle.createEl("span", { text: this.historyExpanded ? "▾" : "▸", cls: "vc-history-arrow" });
+    toggle.createEl("span", { text: "Verlauf", cls: "vc-history-label" });
+
+    const listEl = section.createDiv("vc-history-list");
+    listEl.style.display = this.historyExpanded ? "block" : "none";
+
+    toggle.onclick = async () => {
+      this.historyExpanded = !this.historyExpanded;
+      toggle.empty();
+      toggle.createEl("span", { text: this.historyExpanded ? "▾" : "▸", cls: "vc-history-arrow" });
+      toggle.createEl("span", { text: "Verlauf", cls: "vc-history-label" });
+      listEl.style.display = this.historyExpanded ? "block" : "none";
+      if (this.historyExpanded && this.historyThreads.length === 0) {
+        listEl.setText("Lade…");
+        this.historyThreads = await this.loadHistoryFromVault();
+        this.renderHistoryList(listEl);
+      }
+    };
+
+    if (this.historyExpanded) {
+      if (this.historyThreads.length === 0) {
+        this.historyThreads = await this.loadHistoryFromVault();
+      }
+      this.renderHistoryList(listEl);
+    }
+  }
+
+  private renderHistoryList(listEl: HTMLElement): void {
+    listEl.empty();
+    if (this.historyThreads.length === 0) {
+      listEl.createEl("div", { text: "Keine gespeicherten Chats", cls: "vc-history-empty" });
+      return;
+    }
+    for (const thread of this.historyThreads) {
+      const item = listEl.createDiv("vc-history-item");
+      item.createEl("span", { text: thread.title, cls: "vc-thread-title" });
+      item.onclick = () => {
+        // Import into active threads and switch
+        this.threads.unshift(thread);
+        this.historyThreads = this.historyThreads.filter((t) => t.id !== thread.id);
+        this.switchThread(thread.id);
+        this.renderHistoryList(listEl);
+      };
     }
   }
 }

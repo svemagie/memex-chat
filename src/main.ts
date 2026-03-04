@@ -18,8 +18,16 @@ export default class MemexChatPlugin extends Plugin {
   async onload(): Promise<void> {
     // Load data
     const loaded = (await this.loadData()) as PluginData | null;
+    const mergedSettings: MemexChatSettings = { ...DEFAULT_SETTINGS, ...(loaded?.settings ?? {}) };
+    // Merge promptButtons per-entry so new fields (e.g. helpText) from defaults aren't lost
+    if (loaded?.settings?.promptButtons) {
+      mergedSettings.promptButtons = loaded.settings.promptButtons.map((saved, i) => ({
+        ...(DEFAULT_SETTINGS.promptButtons[i] ?? {}),
+        ...saved,
+      }));
+    }
     this.data = {
-      settings: { ...DEFAULT_SETTINGS, ...(loaded?.settings ?? {}) },
+      settings: mergedSettings,
       threads: loaded?.threads ?? [],
     };
     this.settings = this.data.settings;
@@ -76,6 +84,7 @@ export default class MemexChatPlugin extends Plugin {
     // Build index once the workspace layout (and vault cache) is fully ready
     this.app.workspace.onLayoutReady(() => {
       if (!this.search.isIndexed()) {
+        this.search.priorityProperties = this.settings.contextProperties;
         this.search.buildIndex().catch(console.error);
       }
     });
@@ -94,7 +103,7 @@ export default class MemexChatPlugin extends Plugin {
       return;
     }
 
-    const leaf = this.app.workspace.getRightLeaf(false);
+    const leaf = this.app.workspace.getLeaf("tab");
     if (!leaf) return;
     await leaf.setViewState({ type: VIEW_TYPE_MEMEX_CHAT, active: true });
     this.app.workspace.revealLeaf(leaf);
@@ -104,6 +113,7 @@ export default class MemexChatPlugin extends Plugin {
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMEX_CHAT);
     const view = leaves[0]?.view as ChatView | undefined;
 
+    this.search.priorityProperties = this.settings.contextProperties;
     this.search.onProgress = (done, total) => {
       if (view && done % 200 === 0) {
         // @ts-ignore

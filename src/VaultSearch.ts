@@ -17,6 +17,10 @@ export class VaultSearch {
   private indexing = false;
   onProgress?: (done: number, total: number) => void;
 
+  /** Frontmatter properties whose values are boosted during indexing */
+  priorityProperties: string[] = ["collection", "related", "up", "tags"];
+  private readonly propertyBoost = 5; // tokens from priority properties count 5x
+
   constructor(app: App) {
     this.app = app;
   }
@@ -79,6 +83,16 @@ export class VaultSearch {
           for (const t of tokens) {
             tf.set(t, (tf.get(t) ?? 0) + 1);
           }
+          // Boost tokens from priority frontmatter properties
+          const fm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+          for (const prop of this.priorityProperties) {
+            const val = fm[prop];
+            if (!val) continue;
+            const text = Array.isArray(val) ? val.join(" ") : String(val);
+            for (const t of this.tokenize(text)) {
+              tf.set(t, (tf.get(t) ?? 0) + this.propertyBoost);
+            }
+          }
           // Normalize TF
           const maxTf = Math.max(...tf.values(), 1);
           const normalizedTf: Map<string, number> = new Map();
@@ -131,6 +145,40 @@ export class VaultSearch {
 
   isIndexed(): boolean {
     return this.indexed;
+  }
+
+  /** Find notes with similar names (no index required). Uses substring + word-overlap scoring. */
+  findSimilarByName(query: string, topK = 2, minScore = 0.45): SearchResult[] {
+    const normalize = (s: string) =>
+      s.toLowerCase().replace(/[^\wäöüß\s]/gi, " ").trim();
+    const words = (s: string) => new Set(s.split(/\s+/).filter((w) => w.length > 1));
+
+    const q = normalize(query);
+    const qWords = words(q);
+
+    const scored: Array<[TFile, number]> = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const name = normalize(file.basename);
+      const nameWords = words(name);
+
+      let score = 0;
+      // Substring containment
+      if (name.includes(q) || q.includes(name)) score = 0.9;
+      // Jaccard word overlap
+      const intersection = [...qWords].filter((w) => nameWords.has(w)).length;
+      const union = new Set([...qWords, ...nameWords]).size;
+      if (union > 0) score = Math.max(score, intersection / union);
+
+      if (score >= minScore) scored.push([file, score]);
+    }
+
+    scored.sort((a, b) => b[1] - a[1]);
+    return scored.slice(0, topK).map(([file, score]) => ({
+      file,
+      score,
+      excerpt: "",
+      title: file.basename,
+    }));
   }
 
   /** Search for the top-K most similar notes to the query */
