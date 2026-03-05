@@ -70,7 +70,7 @@ Wenn du Fragen beantwortest:
 };
 
 export const MODELS = [
-  { id: "claude-opus-4-5-20251101", name: "Claude Opus 4.5 (Stärkst)" },
+  { id: "claude-opus-4-5-20251101", name: "Claude Opus 4.5 (Stärkste)" },
   { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5 (Empfohlen)" },
   { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5 (Schnell)" },
 ];
@@ -126,6 +126,11 @@ export class MemexChatSettingsTab extends PluginSettingTab {
     };
 
     containerEl.createEl("h2", { text: "Memex Chat Einstellungen" });
+
+    containerEl.createEl("p", {
+      text: `Memex Chat v${this.plugin.manifest.version}`,
+      cls: "setting-item-description",
+    });
 
     // --- API ---
     containerEl.createEl("h3", { text: "Claude API" });
