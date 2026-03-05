@@ -31134,7 +31134,7 @@ __export(main_exports, {
   default: () => MemexChatPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/ChatView.ts
 var import_obsidian = require("obsidian");
@@ -32291,6 +32291,8 @@ var EMBEDDING_MODELS = [
 ];
 var EmbedSearch = class {
   constructor(app, modelId) {
+    this.excludeFolders = [];
+    // vault folder prefixes to skip
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.pipe = null;
     this.cache = /* @__PURE__ */ new Map();
@@ -32298,6 +32300,8 @@ var EmbedSearch = class {
     this.vecs = /* @__PURE__ */ new Map();
     this.indexed = false;
     this.indexing = false;
+    // ─── Incremental re-embed on file change ─────────────────────────────────
+    this.reembedTimers = /* @__PURE__ */ new Map();
     this.app = app;
     this.modelId = modelId;
   }
@@ -32356,9 +32360,21 @@ var EmbedSearch = class {
     });
   }
   async embed(text) {
+    console.log("[Memex] embed: loadPipeline\u2026");
     await this.loadPipeline();
+    console.log("[Memex] embed: pipe call\u2026");
     const result = await this.pipe(text.slice(0, 512), { pooling: "mean", normalize: true });
+    console.log("[Memex] embed: done, dims:", result.data.length);
     return Array.from(result.data);
+  }
+  /** embed() with a hard timeout; rejects with "embed timeout" if exceeded. */
+  embedWithTimeout(text, ms = 13e3) {
+    return Promise.race([
+      this.embed(text),
+      new Promise(
+        (_, reject) => setTimeout(() => reject(new Error("embed timeout")), ms)
+      )
+    ]);
   }
   cosine(a, b) {
     let dot2 = 0;
@@ -32368,6 +32384,7 @@ var EmbedSearch = class {
   }
   // ─── Index ────────────────────────────────────────────────────────────────
   async buildIndex() {
+    console.log("[Memex] buildIndex START, indexing:", this.indexing);
     if (this.indexing)
       return;
     this.indexing = true;
@@ -32378,13 +32395,17 @@ var EmbedSearch = class {
     try {
       await import_fs3.promises.mkdir(this.modelsDir, { recursive: true });
       await import_fs3.promises.mkdir(this.embedDir, { recursive: true });
+      console.log("[Memex] Verzeichnisse OK:", this.embedDir);
     } catch (e) {
       console.error("[Memex] Verzeichnisse konnten nicht angelegt werden:", e);
     }
     try {
       await this.loadCache();
-      const files = this.app.vault.getMarkdownFiles();
+      console.log("[Memex] Cache geladen, Eintr\xE4ge:", this.cache.size);
+      const allFiles = this.app.vault.getMarkdownFiles();
+      const files = this.excludeFolders.length ? allFiles.filter((f) => !this.excludeFolders.some((ex) => f.path.startsWith(ex + "/"))) : allFiles;
       const total = files.length;
+      console.log("[Memex] Dateien gesamt:", total, "(ausgeschlossen:", allFiles.length - total, ")");
       let done = 0;
       let windowStart = Date.now();
       let windowEmbedded = 0;
@@ -32399,17 +32420,22 @@ var EmbedSearch = class {
             await new Promise((r) => setTimeout(r, 0));
             const raw = await this.app.vault.cachedRead(file);
             const text = this.preprocess(raw).slice(0, 800) + " " + file.basename;
-            const vec = await this.embed(text);
+            const vec = await this.embedWithTimeout(text, this.pipe ? 13e3 : 12e4);
             this.cache.set(file.path, { mtime, vec });
             this.vecs.set(file.path, { vec, file });
             changed.push(file.path);
             windowEmbedded++;
+            if (changed.length === 1 || changed.length % 50 === 0)
+              console.log(`[Memex] Eingebettet: ${changed.length}/${total}`);
+            if (changed.length % 100 === 0)
+              await this.flushBatch(changed.slice(-100));
           } catch (e) {
             if (!this.pipe && !pipelineError) {
               pipelineError = e;
               console.error("[Memex] Pipeline-Ladefehler:", e);
               break;
             }
+            console.warn("[Memex] Datei \xFCbersprungen:", file.path, e);
           }
         }
         done++;
@@ -32425,16 +32451,76 @@ var EmbedSearch = class {
           this.onProgress(done, total, speed);
         }
       }
+      console.log("[Memex] Loop fertig, changed:", changed.length, "pipelineError:", !!pipelineError);
       if (pipelineError)
         throw pipelineError;
       const allPaths = new Set(files.map((f) => f.path));
-      await this.saveCache(changed, allPaths);
+      const remainder = changed.length % 100;
+      await this.saveCache(remainder > 0 ? changed.slice(-remainder) : [], allPaths);
       this.indexed = true;
       if (this.onProgress)
         this.onProgress(total, total, speed);
+    } catch (e) {
+      console.error("[Memex] buildIndex Fehler:", e);
     } finally {
       this.indexing = false;
+      console.log("[Memex] buildIndex END, indexed:", this.indexed);
     }
+  }
+  /**
+   * Debounced re-embed for a single file (called on vault modify events).
+   * Waits 2 s after the last write before embedding.
+   */
+  reembedFile(file) {
+    if (!this.indexed || this.indexing)
+      return;
+    const existing = this.reembedTimers.get(file.path);
+    if (existing)
+      clearTimeout(existing);
+    const timer = setTimeout(async () => {
+      this.reembedTimers.delete(file.path);
+      try {
+        const raw = await this.app.vault.cachedRead(file);
+        const text = this.preprocess(raw).slice(0, 800) + " " + file.basename;
+        const vec = await this.embedWithTimeout(text);
+        const mtime = file.stat.mtime;
+        this.cache.set(file.path, { mtime, vec });
+        this.vecs.set(file.path, { vec, file });
+        await this.saveCache([file.path], new Set(this.vecs.keys()));
+        console.log("[Memex] Re-embedded:", file.path);
+      } catch (e) {
+        console.warn("[Memex] Re-embed fehlgeschlagen:", file.path, e);
+      }
+    }, 2e3);
+    this.reembedTimers.set(file.path, timer);
+  }
+  /** Find notes similar to a given file using its cached vector (no re-embedding). */
+  async searchSimilarToFile(file, topK = 10) {
+    if (!this.indexed)
+      return [];
+    let qvec = this.vecs.get(file.path)?.vec;
+    if (!qvec) {
+      try {
+        const raw = await this.app.vault.cachedRead(file);
+        const text = this.preprocess(raw).slice(0, 800) + " " + file.basename;
+        qvec = await this.embedWithTimeout(text);
+      } catch {
+        return [];
+      }
+    }
+    const scores = [];
+    for (const [path3, { vec }] of this.vecs) {
+      if (path3 === file.path)
+        continue;
+      const s = this.cosine(qvec, vec);
+      if (s > 0.2)
+        scores.push([path3, s]);
+    }
+    scores.sort((a, b) => b[1] - a[1]);
+    return scores.slice(0, topK).map(([path3, score]) => {
+      const { file: f } = this.vecs.get(path3);
+      return { file: f, score, excerpt: "", title: f.basename };
+    });
   }
   async search(query, topK = 8) {
     if (!this.indexed)
@@ -32494,16 +32580,12 @@ var EmbedSearch = class {
       }
     }
   }
-  /**
-   * Write .ajson for each newly embedded note; delete .ajson for removed notes;
-   * write/update the manifest.
-   */
-  async saveCache(changed, allVaultPaths) {
+  /** Write .ajson files for a batch of vault paths (no pruning). Called incrementally. */
+  async flushBatch(vaultPaths) {
     try {
-      await import_fs3.promises.mkdir(this.embedDir, { recursive: true });
       const manifest = { model: this.modelId, version: 1 };
       await import_fs3.promises.writeFile(this.manifestPath, JSON.stringify(manifest), "utf8");
-      for (const vaultPath of changed) {
+      for (const vaultPath of vaultPaths) {
         const entry = this.cache.get(vaultPath);
         if (!entry)
           continue;
@@ -32511,10 +32593,17 @@ var EmbedSearch = class {
         await import_fs3.promises.mkdir((0, import_path3.dirname)(filePath), { recursive: true });
         await import_fs3.promises.writeFile(filePath, JSON.stringify({ mtime: entry.mtime, vec: entry.vec }), "utf8");
       }
-      await this.pruneStale(this.embedDir, allVaultPaths);
     } catch (e) {
-      console.error("[Memex] Embedding-Cache konnte nicht gespeichert werden:", e);
+      console.error("[Memex] flushBatch Fehler:", e);
     }
+  }
+  /**
+   * Final save: flush any remaining changed notes, then prune stale .ajson files.
+   */
+  async saveCache(changed, allVaultPaths) {
+    if (changed.length > 0)
+      await this.flushBatch(changed);
+    await this.pruneStale(this.embedDir, allVaultPaths);
   }
   async pruneStale(dir, allVaultPaths) {
     let entries;
@@ -32640,6 +32729,7 @@ Wenn du Fragen beantwortest:
   systemContextFile: "",
   useEmbeddings: false,
   embeddingModel: "TaylorAI/bge-micro-v2",
+  embedExcludeFolders: [],
   promptButtons: [
     {
       label: "Draft Check",
@@ -32667,6 +32757,41 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    const allFolders = this.app.vault.getAllFolders().map((f) => f.path).filter((p) => p !== "/").sort();
+    const attachFolderDropdown = (wrap, input, getExcluded, onPick) => {
+      const dropdown = wrap.createDiv("vc-folder-dropdown");
+      dropdown.style.display = "none";
+      const refresh = () => {
+        const q = input.value.toLowerCase();
+        const excluded = getExcluded();
+        const matches = allFolders.filter((f) => f.toLowerCase().includes(q) && !excluded.includes(f)).slice(0, 12);
+        dropdown.empty();
+        if (!matches.length) {
+          dropdown.style.display = "none";
+          return;
+        }
+        for (const f of matches) {
+          const item = dropdown.createDiv("vc-folder-item");
+          item.textContent = f;
+          item.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+            onPick(f);
+          });
+        }
+        dropdown.style.display = "block";
+      };
+      input.addEventListener("input", refresh);
+      input.addEventListener("focus", refresh);
+      input.addEventListener("blur", () => setTimeout(() => {
+        dropdown.style.display = "none";
+      }, 150));
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          dropdown.style.display = "none";
+          input.blur();
+        }
+      });
+    };
     containerEl.createEl("h2", { text: "Memex Chat Einstellungen" });
     containerEl.createEl("h3", { text: "Claude API" });
     new import_obsidian3.Setting(containerEl).setName("API Key").setDesc("Dein Anthropic API Key (sk-ant-...)").addText(
@@ -32715,6 +32840,50 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
         await this.plugin.initEmbedSearch();
       });
+    });
+    const exclSetting = new import_obsidian3.Setting(containerEl).setName("Ordner ausschlie\xDFen").setDesc("Diese Ordner werden beim Embedding \xFCbersprungen. Nach \xC4nderung Index neu aufbauen.");
+    exclSetting.settingEl.style.flexWrap = "wrap";
+    exclSetting.settingEl.style.alignItems = "flex-start";
+    const exclTagContainer = exclSetting.controlEl.createDiv("vc-prop-tags");
+    const renderExclTags = () => {
+      exclTagContainer.empty();
+      for (const folder of this.plugin.settings.embedExcludeFolders) {
+        const tag = exclTagContainer.createEl("span", { cls: "vc-prop-tag" });
+        tag.createEl("span", { text: folder });
+        const x = tag.createEl("button", { cls: "vc-prop-tag-remove", text: "\xD7" });
+        x.onclick = async () => {
+          this.plugin.settings.embedExcludeFolders = this.plugin.settings.embedExcludeFolders.filter((f) => f !== folder);
+          await this.plugin.saveSettings();
+          renderExclTags();
+        };
+      }
+    };
+    renderExclTags();
+    const exclWrap = exclSetting.controlEl.createDiv("vc-folder-search-wrap");
+    const exclInput = exclWrap.createEl("input", {
+      cls: "vc-prop-input",
+      attr: { type: "text", placeholder: "Ordner suchen\u2026" }
+    });
+    const addExclFolder = async (folder) => {
+      folder = folder.trim().replace(/\/$/, "");
+      if (!folder || this.plugin.settings.embedExcludeFolders.includes(folder))
+        return;
+      this.plugin.settings.embedExcludeFolders = [...this.plugin.settings.embedExcludeFolders, folder];
+      await this.plugin.saveSettings();
+      exclInput.value = "";
+      renderExclTags();
+    };
+    attachFolderDropdown(
+      exclWrap,
+      exclInput,
+      () => this.plugin.settings.embedExcludeFolders,
+      (f) => addExclFolder(f)
+    );
+    exclInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        addExclFolder(exclInput.value);
+      }
     });
     containerEl.createEl("h3", { text: "Kontext-Einstellungen" });
     new import_obsidian3.Setting(containerEl).setName("Max. Kontext-Notizen").setDesc("Wie viele Notizen werden automatisch als Kontext hinzugef\xFCgt? (1\u201315)").addSlider(
@@ -32842,26 +33011,27 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
               renderFolders();
             };
           }
-          const folderInput = folderSection.createEl("input", {
+          const folderWrap = folderSection.createDiv("vc-folder-search-wrap");
+          folderWrap.style.width = "200px";
+          const folderInput = folderWrap.createEl("input", {
             cls: "vc-pbtn-input",
-            attr: { type: "text", placeholder: "Ordner hinzuf\xFCgen\u2026", style: "width:180px" }
+            attr: { type: "text", placeholder: "Ordner suchen\u2026" }
           });
-          const doAddFolder = async () => {
-            const val = folderInput.value.trim().replace(/\/$/, "");
-            if (!val)
+          const doAddFolder = async (val) => {
+            val = val.trim().replace(/\/$/, "");
+            if (!val || (pb.searchFolders ?? []).includes(val))
               return;
             pb.searchFolders = [...pb.searchFolders ?? [], val];
             await this.plugin.saveSettings();
             renderFolders();
           };
+          attachFolderDropdown(folderWrap, folderInput, () => pb.searchFolders ?? [], (f) => doAddFolder(f));
           folderInput.addEventListener("keydown", (e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              doAddFolder();
+              doAddFolder(folderInput.value);
             }
           });
-          const addFolderBtn = folderSection.createEl("button", { cls: "vc-prop-add-btn", text: "+" });
-          addFolderBtn.onclick = doAddFolder;
         };
         renderFolders();
         checkbox.addEventListener("change", async () => {
@@ -32916,12 +33086,22 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Threads-Ordner").setDesc("Pfad im Vault, wo Chat-Threads gespeichert werden").addText(
-      (text) => text.setPlaceholder("Calendar/Chat").setValue(this.plugin.settings.threadsFolder).onChange(async (value) => {
-        this.plugin.settings.threadsFolder = value;
-        await this.plugin.saveSettings();
-      })
-    );
+    const threadsFolderSetting = new import_obsidian3.Setting(containerEl).setName("Threads-Ordner").setDesc("Pfad im Vault, wo Chat-Threads gespeichert werden");
+    const tfWrap = threadsFolderSetting.controlEl.createDiv("vc-folder-search-wrap");
+    const tfInput = tfWrap.createEl("input", {
+      cls: "vc-prop-input",
+      attr: { type: "text", placeholder: "Calendar/Chat" }
+    });
+    tfInput.value = this.plugin.settings.threadsFolder;
+    tfInput.addEventListener("input", async () => {
+      this.plugin.settings.threadsFolder = tfInput.value;
+      await this.plugin.saveSettings();
+    });
+    attachFolderDropdown(tfWrap, tfInput, () => [], async (f) => {
+      tfInput.value = f;
+      this.plugin.settings.threadsFolder = f;
+      await this.plugin.saveSettings();
+    });
     containerEl.createEl("h3", { text: "System Prompt" });
     new import_obsidian3.Setting(containerEl).setName("System Prompt").setDesc("Instruktionen f\xFCr Claude (wie soll er sich verhalten?)").addTextArea((textarea) => {
       textarea.setValue(this.plugin.settings.systemPrompt).onChange(async (value) => {
@@ -32955,8 +33135,89 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
   }
 };
 
+// src/RelatedNotesView.ts
+var import_obsidian4 = require("obsidian");
+var VIEW_TYPE_RELATED = "memex-related-notes";
+var RelatedNotesView = class extends import_obsidian4.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.refreshTimer = null;
+    this.plugin = plugin;
+  }
+  getViewType() {
+    return VIEW_TYPE_RELATED;
+  }
+  getDisplayText() {
+    return "Verwandte Notizen";
+  }
+  getIcon() {
+    return "sparkles";
+  }
+  async onOpen() {
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleRefresh()));
+    this.registerEvent(this.app.workspace.on("file-open", () => this.scheduleRefresh()));
+    this.render([]);
+    this.scheduleRefresh();
+  }
+  scheduleRefresh(delay = 400) {
+    if (this.refreshTimer)
+      clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => this.refresh(), delay);
+  }
+  /** Called by the plugin when the embedding index finishes building. */
+  onIndexReady() {
+    this.scheduleRefresh(0);
+  }
+  async refresh() {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== "md")
+      return;
+    const es = this.plugin.embedSearch;
+    if (!es || !es.isIndexed()) {
+      this.renderStatus("Embedding-Index wird aufgebaut\u2026");
+      return;
+    }
+    this.renderStatus("Suche verwandte Notizen\u2026");
+    const results = await es.searchSimilarToFile(file);
+    this.render(results, file.basename);
+  }
+  renderStatus(msg) {
+    this.contentEl.empty();
+    this.contentEl.createDiv({ cls: "vc-related-status", text: msg });
+  }
+  render(results, forNote) {
+    this.contentEl.empty();
+    const header = this.contentEl.createDiv("vc-related-header");
+    header.createDiv({ cls: "vc-related-title", text: "Verwandte Notizen" });
+    if (forNote)
+      header.createDiv({ cls: "vc-related-subtitle", text: forNote });
+    if (!results.length) {
+      this.contentEl.createDiv({ cls: "vc-related-status", text: forNote ? "Keine Treffer." : "" });
+      return;
+    }
+    const list = this.contentEl.createDiv("vc-related-list");
+    for (const r of results) {
+      const item = list.createDiv("vc-related-item");
+      const info = item.createDiv("vc-related-info");
+      info.createDiv({ cls: "vc-related-name", text: r.title });
+      const folder = r.file.parent?.path;
+      if (folder && folder !== "/") {
+        info.createDiv({ cls: "vc-related-folder", text: folder });
+      }
+      const scoreWrap = item.createDiv("vc-related-score-wrap");
+      const pct = Math.round(r.score * 100);
+      const bar = scoreWrap.createDiv("vc-related-bar");
+      bar.createDiv({ cls: "vc-related-bar-fill" }).style.width = `${pct}%`;
+      scoreWrap.createDiv({ cls: "vc-related-pct", text: `${pct}%` });
+      item.addEventListener("click", () => {
+        this.app.workspace.openLinkText(r.file.path, r.file.path, false);
+      });
+    }
+  }
+};
+
 // src/main.ts
-var MemexChatPlugin = class extends import_obsidian4.Plugin {
+var MemexChatPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     this.embedSearch = null;
@@ -32982,13 +33243,22 @@ var MemexChatPlugin = class extends import_obsidian4.Plugin {
     this.search = new VaultSearch(this.app);
     this.claude = new ClaudeClient();
     this.registerView(VIEW_TYPE_MEMEX_CHAT, (leaf) => new ChatView(leaf, this));
+    this.registerView(VIEW_TYPE_RELATED, (leaf) => new RelatedNotesView(leaf, this));
     this.addRibbonIcon("message-circle", "Memex Chat \xF6ffnen", () => {
       this.activateView();
+    });
+    this.addRibbonIcon("sparkles", "Verwandte Notizen", () => {
+      this.activateRelatedView();
     });
     this.addCommand({
       id: "open-memex-chat",
       name: "Memex Chat \xF6ffnen",
       callback: () => this.activateView()
+    });
+    this.addCommand({
+      id: "memex-related-notes",
+      name: "Verwandte Notizen anzeigen",
+      callback: () => this.activateRelatedView()
     });
     this.addCommand({
       id: "memex-chat-rebuild-index",
@@ -33039,6 +33309,23 @@ var MemexChatPlugin = class extends import_obsidian4.Plugin {
     await leaf.setViewState({ type: VIEW_TYPE_MEMEX_CHAT, active: true });
     this.app.workspace.revealLeaf(leaf);
   }
+  async activateRelatedView() {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_RELATED);
+    if (existing.length > 0) {
+      this.app.workspace.revealLeaf(existing[0]);
+      return;
+    }
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf)
+      return;
+    await leaf.setViewState({ type: VIEW_TYPE_RELATED, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+  notifyRelatedView() {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_RELATED).forEach((l) => {
+      l.view.onIndexReady();
+    });
+  }
   /** Create or recreate the EmbedSearch instance (called when settings change) */
   async initEmbedSearch() {
     if (!this.settings.useEmbeddings) {
@@ -33046,7 +33333,37 @@ var MemexChatPlugin = class extends import_obsidian4.Plugin {
       return;
     }
     this.embedSearch = new EmbedSearch(this.app, this.settings.embeddingModel);
-    this.embedSearch.buildIndex().catch(console.error);
+    this.embedSearch.excludeFolders = this.settings.embedExcludeFolders ?? [];
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (this.embedSearch && file instanceof import_obsidian5.TFile && file.extension === "md")
+          this.embedSearch.reembedFile(file);
+      })
+    );
+    const notice = new import_obsidian5.Notice("Memex: Embedding wird vorbereitet\u2026", 0);
+    this.embedSearch.onModelStatus = (status) => {
+      notice.setMessage(`Memex: ${status}`);
+    };
+    this.embedSearch.onProgress = (done, total, speed) => {
+      const speedStr = speed > 0 ? ` \u2022 ${speed.toFixed(1)} N/s` : "";
+      const remaining = speed > 0 && done < total ? (total - done) / speed : 0;
+      const eta = remaining > 0 ? ` \u2022 ~${remaining < 60 ? Math.ceil(remaining) + "s" : Math.ceil(remaining / 60) + "min"}` : "";
+      notice.setMessage(`Memex Embedding: ${done}/${total}${speedStr}${eta}`);
+    };
+    this.waitForSyncIdle(notice).then(() => this.embedSearch?.buildIndex()).then(() => {
+      notice.setMessage(`\u2713 Memex: ${this.app.vault.getMarkdownFiles().length} Notizen eingebettet`);
+      setTimeout(() => notice.hide(), 4e3);
+      this.notifyRelatedView();
+    }).catch((e) => {
+      notice.setMessage(`\u2717 Memex Embedding: ${e.message}`);
+      setTimeout(() => notice.hide(), 6e3);
+      console.error(e);
+    }).finally(() => {
+      if (this.embedSearch) {
+        this.embedSearch.onProgress = void 0;
+        this.embedSearch.onModelStatus = void 0;
+      }
+    });
   }
   async rebuildIndex() {
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMEX_CHAT);
@@ -33079,6 +33396,46 @@ var MemexChatPlugin = class extends import_obsidian4.Plugin {
     if (view) {
       view.setStatus(`\u2713 ${this.app.vault.getMarkdownFiles().length} Notizen indiziert`);
       setTimeout(() => view.setStatus(""), 3e3);
+    }
+  }
+  /**
+   * Waits until Obsidian Sync is idle.
+   * Strategy: watch for vault changes; if activity stops for 15 s, sync is done.
+   * If no activity within the first 5 s, sync isn't running — return immediately.
+   * Falls back after 5 minutes regardless.
+   */
+  async waitForSyncIdle(notice) {
+    const syncPlugin = this.app.internalPlugins?.plugins?.["sync"]?.instance;
+    if (!syncPlugin)
+      return;
+    const PROBE_MS = 5e3;
+    const QUIET_MS = 15e3;
+    const MAX_MS = 5 * 6e4;
+    let lastChange = 0;
+    let activitySeen = false;
+    const tick = () => {
+      lastChange = Date.now();
+      activitySeen = true;
+    };
+    this.app.vault.on("create", tick);
+    this.app.vault.on("modify", tick);
+    this.app.vault.on("delete", tick);
+    try {
+      notice.setMessage("Memex: Pr\xFCfe Sync-Status\u2026");
+      await new Promise((r) => setTimeout(r, PROBE_MS));
+      if (!activitySeen)
+        return;
+      notice.setMessage("Memex: Warte auf Obsidian Sync\u2026");
+      const deadline = Date.now() + MAX_MS;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2e3));
+        if (Date.now() - lastChange >= QUIET_MS)
+          return;
+      }
+    } finally {
+      this.app.vault.off("create", tick);
+      this.app.vault.off("modify", tick);
+      this.app.vault.off("delete", tick);
     }
   }
   async saveSettings() {

@@ -1,9 +1,10 @@
-import { Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { ChatView, VIEW_TYPE_MEMEX_CHAT } from "./ChatView";
 import { VaultSearch } from "./VaultSearch";
 import { EmbedSearch } from "./EmbedSearch";
 import { ClaudeClient } from "./ClaudeClient";
 import { MemexChatSettingsTab, MemexChatSettings, DEFAULT_SETTINGS } from "./SettingsTab";
+import { RelatedNotesView, VIEW_TYPE_RELATED } from "./RelatedNotesView";
 
 interface PluginData {
   settings: MemexChatSettings;
@@ -43,12 +44,16 @@ export default class MemexChatPlugin extends Plugin {
     this.search = new VaultSearch(this.app);
     this.claude = new ClaudeClient();
 
-    // Register view
+    // Register views
     this.registerView(VIEW_TYPE_MEMEX_CHAT, (leaf) => new ChatView(leaf, this));
+    this.registerView(VIEW_TYPE_RELATED, (leaf) => new RelatedNotesView(leaf, this));
 
-    // Ribbon icon
+    // Ribbon icons
     this.addRibbonIcon("message-circle", "Memex Chat öffnen", () => {
       this.activateView();
+    });
+    this.addRibbonIcon("sparkles", "Verwandte Notizen", () => {
+      this.activateRelatedView();
     });
 
     // Commands
@@ -56,6 +61,11 @@ export default class MemexChatPlugin extends Plugin {
       id: "open-memex-chat",
       name: "Memex Chat öffnen",
       callback: () => this.activateView(),
+    });
+    this.addCommand({
+      id: "memex-related-notes",
+      name: "Verwandte Notizen anzeigen",
+      callback: () => this.activateRelatedView(),
     });
 
     this.addCommand({
@@ -106,15 +116,26 @@ export default class MemexChatPlugin extends Plugin {
 
   async activateView(): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMEX_CHAT);
-    if (existing.length > 0) {
-      this.app.workspace.revealLeaf(existing[0]);
-      return;
-    }
-
+    if (existing.length > 0) { this.app.workspace.revealLeaf(existing[0]); return; }
     const leaf = this.app.workspace.getLeaf("tab");
     if (!leaf) return;
     await leaf.setViewState({ type: VIEW_TYPE_MEMEX_CHAT, active: true });
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  async activateRelatedView(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_RELATED);
+    if (existing.length > 0) { this.app.workspace.revealLeaf(existing[0]); return; }
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: VIEW_TYPE_RELATED, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  private notifyRelatedView() {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_RELATED).forEach((l) => {
+      (l.view as RelatedNotesView).onIndexReady();
+    });
   }
 
   /** Create or recreate the EmbedSearch instance (called when settings change) */
@@ -124,7 +145,50 @@ export default class MemexChatPlugin extends Plugin {
       return;
     }
     this.embedSearch = new EmbedSearch(this.app, this.settings.embeddingModel);
-    // Don't build immediately — build on first search or explicit rebuild
+    this.embedSearch.excludeFolders = this.settings.embedExcludeFolders ?? [];
+
+    // Re-embed modified notes as they change
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (this.embedSearch && file instanceof TFile && file.extension === "md")
+          this.embedSearch.reembedFile(file);
+      })
+    );
+
+    // Persistent notice updated during background indexing
+    const notice = new Notice("Memex: Embedding wird vorbereitet…", 0);
+
+    this.embedSearch.onModelStatus = (status) => {
+      notice.setMessage(`Memex: ${status}`);
+    };
+
+    this.embedSearch.onProgress = (done, total, speed) => {
+      const speedStr = speed > 0 ? ` • ${speed.toFixed(1)} N/s` : "";
+      const remaining = speed > 0 && done < total ? (total - done) / speed : 0;
+      const eta = remaining > 0
+        ? ` • ~${remaining < 60 ? Math.ceil(remaining) + "s" : Math.ceil(remaining / 60) + "min"}`
+        : "";
+      notice.setMessage(`Memex Embedding: ${done}/${total}${speedStr}${eta}`);
+    };
+
+    // Wait for Obsidian Sync to finish before starting (avoids embedding stale/partial files)
+    this.waitForSyncIdle(notice).then(() => this.embedSearch?.buildIndex())
+      .then(() => {
+        notice.setMessage(`✓ Memex: ${this.app.vault.getMarkdownFiles().length} Notizen eingebettet`);
+        setTimeout(() => notice.hide(), 4000);
+        this.notifyRelatedView();
+      })
+      .catch((e) => {
+        notice.setMessage(`✗ Memex Embedding: ${(e as Error).message}`);
+        setTimeout(() => notice.hide(), 6000);
+        console.error(e);
+      })
+      .finally(() => {
+        if (this.embedSearch) {
+          this.embedSearch.onProgress = undefined;
+          this.embedSearch.onModelStatus = undefined;
+        }
+      });
   }
 
   async rebuildIndex(): Promise<void> {
@@ -163,6 +227,49 @@ export default class MemexChatPlugin extends Plugin {
     if (view) {
       view.setStatus(`✓ ${this.app.vault.getMarkdownFiles().length} Notizen indiziert`);
       setTimeout(() => view.setStatus(""), 3000);
+    }
+  }
+
+  /**
+   * Waits until Obsidian Sync is idle.
+   * Strategy: watch for vault changes; if activity stops for 15 s, sync is done.
+   * If no activity within the first 5 s, sync isn't running — return immediately.
+   * Falls back after 5 minutes regardless.
+   */
+  private async waitForSyncIdle(notice: Notice): Promise<void> {
+    // Only wait if the Sync plugin is installed
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const syncPlugin = (this.app as any).internalPlugins?.plugins?.["sync"]?.instance;
+    if (!syncPlugin) return;
+
+    const PROBE_MS   = 5_000;  // time to detect if sync is active
+    const QUIET_MS   = 15_000; // idle period that signals sync completion
+    const MAX_MS     = 5 * 60_000;
+
+    let lastChange = 0;
+    let activitySeen = false;
+    const tick = () => { lastChange = Date.now(); activitySeen = true; };
+
+    this.app.vault.on("create", tick);
+    this.app.vault.on("modify", tick);
+    this.app.vault.on("delete", tick);
+
+    try {
+      notice.setMessage("Memex: Prüfe Sync-Status…");
+      await new Promise((r) => setTimeout(r, PROBE_MS));
+      if (!activitySeen) return; // no sync activity → proceed immediately
+
+      notice.setMessage("Memex: Warte auf Obsidian Sync…");
+      const deadline = Date.now() + MAX_MS;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2_000));
+        if (Date.now() - lastChange >= QUIET_MS) return; // 15 s quiet → done
+      }
+      // Max wait reached — proceed anyway
+    } finally {
+      this.app.vault.off("create", tick);
+      this.app.vault.off("modify", tick);
+      this.app.vault.off("delete", tick);
     }
   }
 

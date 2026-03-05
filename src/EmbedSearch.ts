@@ -26,6 +26,7 @@ interface Manifest { model: string; version: number }
 export class EmbedSearch {
   private app: App;
   private modelId: string;
+  excludeFolders: string[] = []; // vault folder prefixes to skip
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private pipe: ((text: string, opts: object) => Promise<{ data: Float32Array }>) | null = null;
   private cache: Map<string, EmbedCacheEntry> = new Map(); // vaultPath → entry
@@ -112,9 +113,22 @@ export class EmbedSearch {
   }
 
   private async embed(text: string): Promise<number[]> {
+    console.log("[Memex] embed: loadPipeline…");
     await this.loadPipeline();
+    console.log("[Memex] embed: pipe call…");
     const result = await this.pipe!(text.slice(0, 512), { pooling: "mean", normalize: true });
+    console.log("[Memex] embed: done, dims:", result.data.length);
     return Array.from(result.data);
+  }
+
+  /** embed() with a hard timeout; rejects with "embed timeout" if exceeded. */
+  private embedWithTimeout(text: string, ms = 13000): Promise<number[]> {
+    return Promise.race([
+      this.embed(text),
+      new Promise<number[]>((_, reject) =>
+        setTimeout(() => reject(new Error("embed timeout")), ms)
+      ),
+    ]);
   }
 
   private cosine(a: number[], b: number[]): number {
@@ -126,6 +140,7 @@ export class EmbedSearch {
   // ─── Index ────────────────────────────────────────────────────────────────
 
   async buildIndex(): Promise<void> {
+    console.log("[Memex] buildIndex START, indexing:", this.indexing);
     if (this.indexing) return;
     this.indexing = true;
     this.indexed = false;
@@ -138,15 +153,21 @@ export class EmbedSearch {
     try {
       await fsp.mkdir(this.modelsDir, { recursive: true });
       await fsp.mkdir(this.embedDir, { recursive: true });
+      console.log("[Memex] Verzeichnisse OK:", this.embedDir);
     } catch (e) {
       console.error("[Memex] Verzeichnisse konnten nicht angelegt werden:", e);
     }
 
     try {
       await this.loadCache();
+      console.log("[Memex] Cache geladen, Einträge:", this.cache.size);
 
-      const files = this.app.vault.getMarkdownFiles();
+      const allFiles = this.app.vault.getMarkdownFiles();
+      const files = this.excludeFolders.length
+        ? allFiles.filter((f) => !this.excludeFolders.some((ex) => f.path.startsWith(ex + "/")))
+        : allFiles;
       const total = files.length;
+      console.log("[Memex] Dateien gesamt:", total, "(ausgeschlossen:", allFiles.length - total, ")");
       let done = 0;
       let windowStart = Date.now();
       let windowEmbedded = 0;
@@ -165,11 +186,16 @@ export class EmbedSearch {
             await new Promise((r) => setTimeout(r, 0));
             const raw = await this.app.vault.cachedRead(file);
             const text = this.preprocess(raw).slice(0, 800) + " " + file.basename;
-            const vec = await this.embed(text);
+            // First call initialises WASM + loads model — allow extra time
+            const vec = await this.embedWithTimeout(text, this.pipe ? 13000 : 120000);
             this.cache.set(file.path, { mtime, vec });
             this.vecs.set(file.path, { vec, file });
             changed.push(file.path);
             windowEmbedded++;
+            if (changed.length === 1 || changed.length % 50 === 0)
+              console.log(`[Memex] Eingebettet: ${changed.length}/${total}`);
+            // Flush newly embedded notes to disk every 100 to preserve progress
+            if (changed.length % 100 === 0) await this.flushBatch(changed.slice(-100));
           } catch (e) {
             if (!this.pipe && !pipelineError) {
               // Pipeline failed to load — log once and abort embedding loop
@@ -177,6 +203,7 @@ export class EmbedSearch {
               console.error("[Memex] Pipeline-Ladefehler:", e);
               break;
             }
+            console.warn("[Memex] Datei übersprungen:", file.path, e);
             // skip individual file
           }
         }
@@ -192,15 +219,76 @@ export class EmbedSearch {
         }
       }
 
+      console.log("[Memex] Loop fertig, changed:", changed.length, "pipelineError:", !!pipelineError);
       if (pipelineError) throw pipelineError;
 
       const allPaths = new Set(files.map((f) => f.path));
-      await this.saveCache(changed, allPaths);
+      // Flush remainder (notes not yet flushed by the every-100 batches)
+      const remainder = changed.length % 100;
+      await this.saveCache(remainder > 0 ? changed.slice(-remainder) : [], allPaths);
       this.indexed = true;
       if (this.onProgress) this.onProgress(total, total, speed);
+    } catch (e) {
+      console.error("[Memex] buildIndex Fehler:", e);
     } finally {
       this.indexing = false;
+      console.log("[Memex] buildIndex END, indexed:", this.indexed);
     }
+  }
+
+  // ─── Incremental re-embed on file change ─────────────────────────────────
+
+  private reembedTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
+  /**
+   * Debounced re-embed for a single file (called on vault modify events).
+   * Waits 2 s after the last write before embedding.
+   */
+  reembedFile(file: TFile): void {
+    if (!this.indexed || this.indexing) return;
+    const existing = this.reembedTimers.get(file.path);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(async () => {
+      this.reembedTimers.delete(file.path);
+      try {
+        const raw = await this.app.vault.cachedRead(file);
+        const text = this.preprocess(raw).slice(0, 800) + " " + file.basename;
+        const vec = await this.embedWithTimeout(text);
+        const mtime = file.stat.mtime;
+        this.cache.set(file.path, { mtime, vec });
+        this.vecs.set(file.path, { vec, file });
+        await this.saveCache([file.path], new Set(this.vecs.keys()));
+        console.log("[Memex] Re-embedded:", file.path);
+      } catch (e) {
+        console.warn("[Memex] Re-embed fehlgeschlagen:", file.path, e);
+      }
+    }, 2000);
+    this.reembedTimers.set(file.path, timer);
+  }
+
+  /** Find notes similar to a given file using its cached vector (no re-embedding). */
+  async searchSimilarToFile(file: TFile, topK = 10): Promise<SearchResult[]> {
+    if (!this.indexed) return [];
+    let qvec = this.vecs.get(file.path)?.vec;
+    if (!qvec) {
+      // File not yet indexed — embed on the fly
+      try {
+        const raw = await this.app.vault.cachedRead(file);
+        const text = this.preprocess(raw).slice(0, 800) + " " + file.basename;
+        qvec = await this.embedWithTimeout(text);
+      } catch { return []; }
+    }
+    const scores: Array<[string, number]> = [];
+    for (const [path, { vec }] of this.vecs) {
+      if (path === file.path) continue;
+      const s = this.cosine(qvec, vec);
+      if (s > 0.2) scores.push([path, s]);
+    }
+    scores.sort((a, b) => b[1] - a[1]);
+    return scores.slice(0, topK).map(([path, score]) => {
+      const { file: f } = this.vecs.get(path)!;
+      return { file: f, score, excerpt: "", title: f.basename };
+    });
   }
 
   async search(query: string, topK = 8): Promise<SearchResult[]> {
@@ -265,32 +353,29 @@ export class EmbedSearch {
     }
   }
 
-  /**
-   * Write .ajson for each newly embedded note; delete .ajson for removed notes;
-   * write/update the manifest.
-   */
-  private async saveCache(changed: string[], allVaultPaths: Set<string>): Promise<void> {
+  /** Write .ajson files for a batch of vault paths (no pruning). Called incrementally. */
+  private async flushBatch(vaultPaths: string[]): Promise<void> {
     try {
-      await fsp.mkdir(this.embedDir, { recursive: true });
-
-      // Manifest
       const manifest: Manifest = { model: this.modelId, version: 1 };
       await fsp.writeFile(this.manifestPath, JSON.stringify(manifest), "utf8");
-
-      // Write only the newly embedded notes
-      for (const vaultPath of changed) {
+      for (const vaultPath of vaultPaths) {
         const entry = this.cache.get(vaultPath);
         if (!entry) continue;
         const filePath = this.noteEmbedPath(vaultPath);
         await fsp.mkdir(dirname(filePath), { recursive: true });
         await fsp.writeFile(filePath, JSON.stringify({ mtime: entry.mtime, vec: entry.vec }), "utf8");
       }
-
-      // Prune .ajson files whose notes no longer exist
-      await this.pruneStale(this.embedDir, allVaultPaths);
     } catch (e) {
-      console.error("[Memex] Embedding-Cache konnte nicht gespeichert werden:", e);
+      console.error("[Memex] flushBatch Fehler:", e);
     }
+  }
+
+  /**
+   * Final save: flush any remaining changed notes, then prune stale .ajson files.
+   */
+  private async saveCache(changed: string[], allVaultPaths: Set<string>): Promise<void> {
+    if (changed.length > 0) await this.flushBatch(changed);
+    await this.pruneStale(this.embedDir, allVaultPaths);
   }
 
   private async pruneStale(dir: string, allVaultPaths: Set<string>): Promise<void> {

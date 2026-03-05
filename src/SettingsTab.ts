@@ -25,8 +25,9 @@ export interface MemexChatSettings {
   contextProperties: string[];
   promptButtons: PromptButton[];
   systemContextFile: string; // optional vault path for extended system context
-  useEmbeddings: boolean;   // use local embedding model instead of TF-IDF
-  embeddingModel: string;   // HuggingFace model ID
+  useEmbeddings: boolean;         // use local embedding model instead of TF-IDF
+  embeddingModel: string;         // HuggingFace model ID
+  embedExcludeFolders: string[];  // vault folders to skip during embedding
 }
 
 export const DEFAULT_SETTINGS: MemexChatSettings = {
@@ -52,6 +53,7 @@ Wenn du Fragen beantwortest:
   systemContextFile: "",
   useEmbeddings: false,
   embeddingModel: "TaylorAI/bge-micro-v2",
+  embedExcludeFolders: [],
   promptButtons: [
     {
       label: "Draft Check",
@@ -84,6 +86,44 @@ export class MemexChatSettingsTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
+    // Sorted vault folder list — used by all folder autocompletes in this settings page
+    const allFolders = this.app.vault.getAllFolders()
+      .map((f) => f.path)
+      .filter((p) => p !== "/")
+      .sort();
+
+    /** Attaches a folder-search dropdown to a wrapper element. onPick is called with the selected folder. */
+    const attachFolderDropdown = (
+      wrap: HTMLElement,
+      input: HTMLInputElement,
+      getExcluded: () => string[],
+      onPick: (folder: string) => void,
+    ) => {
+      const dropdown = wrap.createDiv("vc-folder-dropdown");
+      dropdown.style.display = "none";
+      const refresh = () => {
+        const q = input.value.toLowerCase();
+        const excluded = getExcluded();
+        const matches = allFolders
+          .filter((f) => f.toLowerCase().includes(q) && !excluded.includes(f))
+          .slice(0, 12);
+        dropdown.empty();
+        if (!matches.length) { dropdown.style.display = "none"; return; }
+        for (const f of matches) {
+          const item = dropdown.createDiv("vc-folder-item");
+          item.textContent = f;
+          item.addEventListener("mousedown", (e) => { e.preventDefault(); onPick(f); });
+        }
+        dropdown.style.display = "block";
+      };
+      input.addEventListener("input", refresh);
+      input.addEventListener("focus", refresh);
+      input.addEventListener("blur", () => setTimeout(() => { dropdown.style.display = "none"; }, 150));
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") { dropdown.style.display = "none"; input.blur(); }
+      });
+    };
 
     containerEl.createEl("h2", { text: "Memex Chat Einstellungen" });
 
@@ -167,6 +207,52 @@ export class MemexChatSettingsTab extends PluginSettingTab {
           await this.plugin.initEmbedSearch();
         });
       });
+
+    // Exclude folders from embedding
+    const exclSetting = new Setting(containerEl)
+      .setName("Ordner ausschließen")
+      .setDesc("Diese Ordner werden beim Embedding übersprungen. Nach Änderung Index neu aufbauen.");
+    exclSetting.settingEl.style.flexWrap = "wrap";
+    exclSetting.settingEl.style.alignItems = "flex-start";
+
+    const exclTagContainer = exclSetting.controlEl.createDiv("vc-prop-tags");
+    const renderExclTags = () => {
+      exclTagContainer.empty();
+      for (const folder of this.plugin.settings.embedExcludeFolders) {
+        const tag = exclTagContainer.createEl("span", { cls: "vc-prop-tag" });
+        tag.createEl("span", { text: folder });
+        const x = tag.createEl("button", { cls: "vc-prop-tag-remove", text: "×" });
+        x.onclick = async () => {
+          this.plugin.settings.embedExcludeFolders =
+            this.plugin.settings.embedExcludeFolders.filter((f) => f !== folder);
+          await this.plugin.saveSettings();
+          renderExclTags();
+        };
+      }
+    };
+    renderExclTags();
+
+    const exclWrap = exclSetting.controlEl.createDiv("vc-folder-search-wrap");
+    const exclInput = exclWrap.createEl("input", {
+      cls: "vc-prop-input",
+      attr: { type: "text", placeholder: "Ordner suchen…" },
+    }) as HTMLInputElement;
+
+    const addExclFolder = async (folder: string) => {
+      folder = folder.trim().replace(/\/$/, "");
+      if (!folder || this.plugin.settings.embedExcludeFolders.includes(folder)) return;
+      this.plugin.settings.embedExcludeFolders = [...this.plugin.settings.embedExcludeFolders, folder];
+      await this.plugin.saveSettings();
+      exclInput.value = "";
+      renderExclTags();
+    };
+    attachFolderDropdown(exclWrap, exclInput,
+      () => this.plugin.settings.embedExcludeFolders,
+      (f) => addExclFolder(f),
+    );
+    exclInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); addExclFolder(exclInput.value); }
+    });
 
     // --- Context ---
     containerEl.createEl("h3", { text: "Kontext-Einstellungen" });
@@ -334,20 +420,23 @@ export class MemexChatSettingsTab extends PluginSettingTab {
               renderFolders();
             };
           }
-          const folderInput = folderSection.createEl("input", {
+          const folderWrap = folderSection.createDiv("vc-folder-search-wrap");
+          folderWrap.style.width = "200px";
+          const folderInput = folderWrap.createEl("input", {
             cls: "vc-pbtn-input",
-            attr: { type: "text", placeholder: "Ordner hinzufügen…", style: "width:180px" },
+            attr: { type: "text", placeholder: "Ordner suchen…" },
           }) as HTMLInputElement;
-          const doAddFolder = async () => {
-            const val = folderInput.value.trim().replace(/\/$/, "");
-            if (!val) return;
+          const doAddFolder = async (val: string) => {
+            val = val.trim().replace(/\/$/, "");
+            if (!val || (pb.searchFolders ?? []).includes(val)) return;
             pb.searchFolders = [...(pb.searchFolders ?? []), val];
             await this.plugin.saveSettings();
             renderFolders();
           };
-          folderInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doAddFolder(); } });
-          const addFolderBtn = folderSection.createEl("button", { cls: "vc-prop-add-btn", text: "+" });
-          addFolderBtn.onclick = doAddFolder;
+          attachFolderDropdown(folderWrap, folderInput, () => pb.searchFolders ?? [], (f) => doAddFolder(f));
+          folderInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); doAddFolder(folderInput.value); }
+          });
         };
         renderFolders();
 
@@ -413,18 +502,24 @@ export class MemexChatSettingsTab extends PluginSettingTab {
         })
       );
 
-    new Setting(containerEl)
+    const threadsFolderSetting = new Setting(containerEl)
       .setName("Threads-Ordner")
-      .setDesc("Pfad im Vault, wo Chat-Threads gespeichert werden")
-      .addText((text) =>
-        text
-          .setPlaceholder("Calendar/Chat")
-          .setValue(this.plugin.settings.threadsFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.threadsFolder = value;
-            await this.plugin.saveSettings();
-          })
-      );
+      .setDesc("Pfad im Vault, wo Chat-Threads gespeichert werden");
+    const tfWrap = threadsFolderSetting.controlEl.createDiv("vc-folder-search-wrap");
+    const tfInput = tfWrap.createEl("input", {
+      cls: "vc-prop-input",
+      attr: { type: "text", placeholder: "Calendar/Chat" },
+    }) as HTMLInputElement;
+    tfInput.value = this.plugin.settings.threadsFolder;
+    tfInput.addEventListener("input", async () => {
+      this.plugin.settings.threadsFolder = tfInput.value;
+      await this.plugin.saveSettings();
+    });
+    attachFolderDropdown(tfWrap, tfInput, () => [], async (f) => {
+      tfInput.value = f;
+      this.plugin.settings.threadsFolder = f;
+      await this.plugin.saveSettings();
+    });
 
     // --- System Prompt ---
     containerEl.createEl("h3", { text: "System Prompt" });
