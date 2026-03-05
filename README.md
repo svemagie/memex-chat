@@ -11,7 +11,6 @@ Chat with your Obsidian vault using Claude AI. Semantic context retrieval, `@` m
 - **Context preview** — see and edit which notes are included before sending
 - **`@Notizname` mentions** — reference specific notes directly in your message with autocomplete
 - **Thread history** — chats saved as Markdown in your vault (default: `Calendar/Chat/`)
-- **Streaming responses** — Claude's answer appears token by token
 - **Source links** — every answer shows which notes were used
 - **Prompt buttons** — header mode buttons that extend Claude's system prompt (e.g. draft check, monthly review)
 
