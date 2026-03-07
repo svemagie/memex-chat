@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, TFile } from "obsidian";
 import { ChatView, VIEW_TYPE_MEMEX_CHAT } from "./ChatView";
 import { VaultSearch } from "./VaultSearch";
 import { EmbedSearch } from "./EmbedSearch";
@@ -134,7 +134,7 @@ export default class MemexChatPlugin extends Plugin {
 
   private notifyRelatedView() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_RELATED).forEach((l) => {
-      (l.view as RelatedNotesView).onIndexReady();
+      if (l.view instanceof RelatedNotesView) l.view.onIndexReady();
     });
   }
 
