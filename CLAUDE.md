@@ -74,7 +74,7 @@ Entry: `src/main.ts` → bundled to `main.js` via esbuild (CJS, ES2018 target).
 | Field | Default | Description |
 |---|---|---|
 | `apiKey` | `""` | Anthropic API key |
-| `model` | `claude-opus-4-5-20251101` | Claude model ID |
+| `model` | `claude-opus-4-6` | Claude model ID |
 | `maxTokens` | `8192` | Max output tokens (1024–16000) |
 | `maxContextNotes` | `6` | TF-IDF/embedding context notes per query |
 | `maxCharsPerNote` | `2500` | Characters per context note |
@@ -118,4 +118,4 @@ Copy `main.js`, `manifest.json`, `styles.css` into `.obsidian/plugins/memex-chat
 
 ## Models (SettingsTab.ts)
 
-Default: `claude-opus-4-5-20251101`. Update `MODELS` array and `DEFAULT_SETTINGS.model` when adding new model IDs.
+Default: `claude-opus-4-6`. Update `MODELS` array and `DEFAULT_SETTINGS.model` when adding new model IDs.

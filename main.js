@@ -32725,13 +32725,37 @@ var ClaudeClient = class {
     }
     return response.json.content?.[0]?.text ?? "";
   }
+  /**
+   * Fetch Claude models from the Anthropic Models API.
+   * Returns the 2 newest versions of each family (opus, sonnet, haiku), in that order.
+   */
+  async fetchModels(apiKey) {
+    const response = await (0, import_obsidian2.requestUrl)({
+      url: "https://api.anthropic.com/v1/models",
+      method: "GET",
+      headers: this.headers(apiKey),
+      throw: false
+    });
+    if (response.status >= 400) {
+      throw new Error(`API Error ${response.status}: ${response.text}`);
+    }
+    const data = response.json.data ?? [];
+    if (data.length === 0) {
+      throw new Error("No models returned");
+    }
+    const sorted = data.sort((a, b) => b.created - a.created);
+    const families = ["opus", "sonnet", "haiku"];
+    return families.flatMap(
+      (family) => sorted.filter((m) => m.id.includes(family)).slice(0, 2).map((m) => ({ id: m.id, name: m.id }))
+    );
+  }
 };
 
 // src/SettingsTab.ts
 var import_obsidian3 = require("obsidian");
 var DEFAULT_SETTINGS = {
   apiKey: "",
-  model: "claude-opus-4-5-20251101",
+  model: "claude-opus-4-6",
   maxTokens: 8192,
   maxContextNotes: 6,
   maxCharsPerNote: 2500,
@@ -32768,8 +32792,8 @@ Wenn du Fragen beantwortest:
   ]
 };
 var MODELS = [
-  { id: "claude-opus-4-5-20251101", name: "Claude Opus 4.5 (St\xE4rkste)" },
-  { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5 (Empfohlen)" },
+  { id: "claude-opus-4-6", name: "Claude Opus 4.6 (St\xE4rkste)" },
+  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Empfohlen)" },
   { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5 (Schnell)" }
 ];
 var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
@@ -32827,12 +32851,36 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Modell").setDesc("Welches Claude-Modell verwenden?").addDropdown((drop) => {
+    let modelDrop;
+    let refreshBtn;
+    new import_obsidian3.Setting(containerEl).setName("Modell").setDesc("Welches Claude-Modell verwenden? (Aktualisieren zeigt Roh-IDs)").addDropdown((drop) => {
+      modelDrop = drop;
       for (const m of MODELS)
         drop.addOption(m.id, m.name);
       drop.setValue(this.plugin.settings.model).onChange(async (value) => {
         this.plugin.settings.model = value;
         await this.plugin.saveSettings();
+      });
+    }).addButton((btn) => {
+      refreshBtn = btn;
+      btn.setButtonText("Aktualisieren").onClick(async () => {
+        const prev = modelDrop.getValue();
+        refreshBtn.setDisabled(true);
+        refreshBtn.setButtonText("...");
+        try {
+          const models = await this.plugin.claude.fetchModels(this.plugin.settings.apiKey);
+          modelDrop.selectEl.empty();
+          for (const m of models)
+            modelDrop.addOption(m.id, m.name);
+          modelDrop.setValue(prev);
+          this.plugin.settings.model = modelDrop.getValue();
+          await this.plugin.saveSettings();
+        } catch (err) {
+          new import_obsidian3.Notice("Modelle konnten nicht geladen werden: " + err.message);
+        } finally {
+          refreshBtn.setDisabled(false);
+          refreshBtn.setButtonText("Aktualisieren");
+        }
       });
     });
     new import_obsidian3.Setting(containerEl).setName("Max. Antwort-Tokens").setDesc("Maximale L\xE4nge der Claude-Antwort. F\xFCr lange Analysen (z.B. Monthly Check) h\xF6her einstellen. (1024\u201316000)").addSlider(
@@ -33314,6 +33362,12 @@ var MemexChatPlugin = class extends import_obsidian5.Plugin {
       }
     });
     this.addSettingTab(new MemexChatSettingsTab(this.app, this));
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (this.embedSearch && file instanceof import_obsidian5.TFile && file.extension === "md")
+          this.embedSearch.reembedFile(file);
+      })
+    );
     this.app.workspace.onLayoutReady(() => {
       if (!this.search.isIndexed()) {
         this.search.priorityProperties = this.settings.contextProperties;
@@ -33366,24 +33420,19 @@ var MemexChatPlugin = class extends import_obsidian5.Plugin {
     this.embedSearch = new EmbedSearch(this.app, this.settings.embeddingModel);
     this.embedSearch.excludeFolders = this.settings.embedExcludeFolders ?? [];
     this.embedSearch.contextProperties = this.settings.contextProperties ?? [];
-    this.registerEvent(
-      this.app.vault.on("modify", (file) => {
-        if (this.embedSearch && file instanceof import_obsidian5.TFile && file.extension === "md")
-          this.embedSearch.reembedFile(file);
-      })
-    );
-    const notice = new import_obsidian5.Notice("Memex: Embedding wird vorbereitet\u2026", 0);
+    const modelShort = this.settings.embeddingModel.split("/").pop() ?? this.settings.embeddingModel;
+    const notice = new import_obsidian5.Notice(`Memex [${modelShort}]: Embedding wird vorbereitet\u2026`, 0);
     this.embedSearch.onModelStatus = (status) => {
-      notice.setMessage(`Memex: ${status}`);
+      notice.setMessage(`Memex [${modelShort}]: ${status}`);
     };
     this.embedSearch.onProgress = (done, total, speed) => {
       const speedStr = speed > 0 ? ` \u2022 ${speed.toFixed(1)} N/s` : "";
       const remaining = speed > 0 && done < total ? (total - done) / speed : 0;
       const eta = remaining > 0 ? ` \u2022 ~${remaining < 60 ? Math.ceil(remaining) + "s" : Math.ceil(remaining / 60) + "min"}` : "";
-      notice.setMessage(`Memex Embedding: ${done}/${total}${speedStr}${eta}`);
+      notice.setMessage(`Memex [${modelShort}]: ${done}/${total}${speedStr}${eta}`);
     };
     this.waitForSyncIdle(notice).then(() => this.embedSearch?.buildIndex()).then(() => {
-      notice.setMessage(`\u2713 Memex: ${this.app.vault.getMarkdownFiles().length} Notizen eingebettet`);
+      notice.setMessage(`\u2713 Memex [${modelShort}]: ${this.app.vault.getMarkdownFiles().length} Notizen eingebettet`);
       setTimeout(() => notice.hide(), 4e3);
       this.notifyRelatedView();
     }).catch((e) => {
