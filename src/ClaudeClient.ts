@@ -83,4 +83,28 @@ export class ClaudeClient {
 
     return response.json.content?.[0]?.text ?? "";
   }
+
+  /** Fetch the 3 newest Claude models from the Anthropic Models API. */
+  async fetchModels(apiKey: string): Promise<{ id: string; name: string }[]> {
+    const response = await requestUrl({
+      url: "https://api.anthropic.com/v1/models",
+      method: "GET",
+      headers: this.headers(apiKey),
+      throw: false,
+    });
+
+    if (response.status >= 400) {
+      throw new Error(`API Error ${response.status}: ${response.text}`);
+    }
+
+    const data: { id: string; created: number }[] = response.json.data ?? [];
+    if (data.length === 0) {
+      throw new Error("No models returned");
+    }
+
+    return data
+      .sort((a, b) => b.created - a.created)
+      .slice(0, 3)
+      .map((m) => ({ id: m.id, name: m.id }));
+  }
 }
