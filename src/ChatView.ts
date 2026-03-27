@@ -215,7 +215,7 @@ export class ChatView extends ItemView {
 
   // ─── Thread Management ────────────────────────────────────────────────────
 
-  private newThread(): void {
+  newThread(): void {
     const thread: Thread = {
       id: Date.now().toString(),
       title: "Neuer Chat",

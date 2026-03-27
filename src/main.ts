@@ -85,6 +85,7 @@ export default class MemexChatPlugin extends Plugin {
             const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMEX_CHAT)[0];
             if (leaf) {
               const view = leaf.view as ChatView;
+              view.newThread();
               view.setInputValue(`Erkläre und verknüpfe [[${file.basename}]] mit anderen Konzepten im Vault.`);
               view.setExplicitContext([file]);
             }

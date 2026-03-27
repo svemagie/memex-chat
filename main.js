@@ -33305,6 +33305,7 @@ var MemexChatPlugin = class extends import_obsidian5.Plugin {
             const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMEX_CHAT)[0];
             if (leaf) {
               const view = leaf.view;
+              view.newThread();
               view.setInputValue(`Erkl\xE4re und verkn\xFCpfe [[${file.basename}]] mit anderen Konzepten im Vault.`);
               view.setExplicitContext([file]);
             }
