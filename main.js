@@ -32667,6 +32667,54 @@ var EmbedSearch = class {
   }
 };
 
+// src/HybridSearch.ts
+var RRF_K = 60;
+var HybridSearch = class {
+  constructor(tfidf, embed) {
+    this.tfidf = tfidf;
+    this.embed = embed;
+  }
+  isIndexed() {
+    return this.embed.isIndexed();
+  }
+  async search(query, topK = 8) {
+    const fetchK = topK * 3;
+    const [tfidfResults, embedResults] = await Promise.all([
+      this.tfidf.search(query, fetchK),
+      this.embed.search(query, fetchK)
+    ]);
+    const tfidfRank = /* @__PURE__ */ new Map();
+    tfidfResults.forEach((r, i) => tfidfRank.set(r.file.path, i));
+    const embedRank = /* @__PURE__ */ new Map();
+    embedResults.forEach((r, i) => embedRank.set(r.file.path, i));
+    const tfidfMap = new Map(tfidfResults.map((r) => [r.file.path, r]));
+    const embedMap = new Map(embedResults.map((r) => [r.file.path, r]));
+    const allPaths = /* @__PURE__ */ new Set([
+      ...tfidfResults.map((r) => r.file.path),
+      ...embedResults.map((r) => r.file.path)
+    ]);
+    const scored = [];
+    for (const path3 of allPaths) {
+      const tr = tfidfRank.has(path3) ? 1 / (RRF_K + tfidfRank.get(path3) + 1) : 0;
+      const er = embedRank.has(path3) ? 1 / (RRF_K + embedRank.get(path3) + 1) : 0;
+      scored.push([path3, tr + er]);
+    }
+    scored.sort((a, b) => b[1] - a[1]);
+    return scored.slice(0, topK).map(([path3, score]) => {
+      const t = tfidfMap.get(path3);
+      const e = embedMap.get(path3);
+      const base = t ?? e;
+      return {
+        file: base.file,
+        score,
+        excerpt: t?.excerpt ?? "",
+        title: base.title,
+        linked: t?.linked ?? e?.linked
+      };
+    });
+  }
+};
+
 // src/ClaudeClient.ts
 var import_obsidian2 = require("obsidian");
 var ClaudeClient = class {
@@ -33299,10 +33347,11 @@ var MemexChatPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     this.embedSearch = null;
+    this.hybridSearch = null;
   }
-  /** Returns the active search engine: EmbedSearch when enabled, else VaultSearch */
+  /** Returns the active search engine: HybridSearch when embeddings are ready, else VaultSearch */
   get activeSearch() {
-    return this.embedSearch ?? this.search;
+    return this.hybridSearch ?? this.search;
   }
   async onload() {
     const loaded = await this.loadData();
@@ -33415,6 +33464,7 @@ var MemexChatPlugin = class extends import_obsidian5.Plugin {
   async initEmbedSearch() {
     if (!this.settings.useEmbeddings) {
       this.embedSearch = null;
+      this.hybridSearch = null;
       return;
     }
     this.embedSearch = new EmbedSearch(this.app, this.settings.embeddingModel);
@@ -33432,6 +33482,8 @@ var MemexChatPlugin = class extends import_obsidian5.Plugin {
       notice.setMessage(`Memex [${modelShort}]: ${done}/${total}${speedStr}${eta}`);
     };
     this.waitForSyncIdle(notice).then(() => this.embedSearch?.buildIndex()).then(() => {
+      if (this.embedSearch)
+        this.hybridSearch = new HybridSearch(this.search, this.embedSearch);
       notice.setMessage(`\u2713 Memex [${modelShort}]: ${this.app.vault.getMarkdownFiles().length} Notizen eingebettet`);
       setTimeout(() => notice.hide(), 4e3);
       this.notifyRelatedView();
@@ -33450,6 +33502,7 @@ var MemexChatPlugin = class extends import_obsidian5.Plugin {
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMEX_CHAT);
     const view = leaves[0]?.view;
     if (this.settings.useEmbeddings && this.embedSearch) {
+      this.hybridSearch = null;
       this.embedSearch.onModelStatus = (status) => {
         if (view)
           view.setStatus(status);
@@ -33462,6 +33515,7 @@ var MemexChatPlugin = class extends import_obsidian5.Plugin {
         }
       };
       await this.embedSearch.buildIndex();
+      this.hybridSearch = new HybridSearch(this.search, this.embedSearch);
       this.embedSearch.onProgress = void 0;
       this.embedSearch.onModelStatus = void 0;
     } else {

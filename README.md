@@ -4,12 +4,11 @@ Chat with your Obsidian vault using Claude AI. Ask questions about your notes, g
 
 ## Features
 
-- **Semantic vault search** — TF-IDF index over all your notes, no external API needed for retrieval
-- **Local embeddings** — optional on-device semantic search using `@xenova/transformers` (BGE Micro v2), fully offline after first model download
+- **Vault search** — TF-IDF index by default; enable local embeddings for hybrid mode (TF-IDF + semantic merged via RRF), fully offline after first model download
 - **Related notes sidebar** — panel showing the most similar notes to whatever you have open, ranked by semantic similarity + frontmatter links + shared tags
 - **Auto context** — relevant notes are automatically found and sent to Claude as context
-- **Context preview** — see and edit which notes are included before sending
-- **`@mention` autocomplete** — reference specific notes directly in your message
+- **Context preview** — see which notes are included before sending, or dismiss to send without context
+- **`@mention` autocomplete** — pin specific notes into context directly from the input field
 - **Thread history** — chats saved as Markdown in your vault (default: `Calendar/Chat/`)
 - **Source links** — every answer shows which notes were used as context
 - **Prompt buttons** — header mode buttons that extend Claude's system prompt (e.g. draft check, monthly review)
@@ -67,8 +66,8 @@ Header buttons that activate a mode by extending Claude's system prompt with the
 When a button is active:
 - The file at its configured vault path is appended to the system prompt
 - An optional hint is shown above the input
-- If `searchMode: "date"` is set, context retrieval switches from TF-IDF/embeddings to date-based file lookup (useful for monthly review modes)
-- Auto context retrieval is skipped while any button is active
+- If `searchMode: "date"` is set, context retrieval switches to date-based file lookup (useful for monthly review modes)
+- Auto context retrieval is skipped
 
 Configure prompt buttons in **Settings → Prompt Buttons**.
 
@@ -82,18 +81,18 @@ In settings you can specify a vault note to always append to the system prompt (
 |---|---|
 | `Memex Chat öffnen` | Open the chat panel |
 | `Verwandte Notizen` | Open the related notes sidebar |
-| `Memex Chat: Index neu aufbauen` | Rebuild the TF-IDF search index |
+| `Memex Chat: Index neu aufbauen` | Rebuild the search index |
 | `Memex Chat: Aktive Notiz als Kontext` | Ask Claude about the currently open note |
 
 ## Related Notes Sidebar
 
-Opens in the right sidebar and automatically shows the top 10 most similar notes to the currently active file. Similarity is computed from:
+Requires embeddings to be enabled. Opens in the right sidebar and automatically shows the top 10 most similar notes to the currently active file. Similarity is computed from:
 
-1. **Semantic embedding similarity** (cosine distance on 384-dim vectors)
+1. **Semantic embedding similarity** (cosine similarity on 384-dim vectors)
 2. **+0.15 boost** for notes linked via `contextProperties` frontmatter fields (e.g. `related: [[Note]]`)
 3. **+0.05 per shared tag** (up to +0.15)
 
-Notes explicitly linked via frontmatter are marked with a **verknüpft** badge.
+Notes boosted by a frontmatter link are marked with a **verknüpft** badge.
 
 ## Settings
 
@@ -102,7 +101,7 @@ Notes explicitly linked via frontmatter are marked with a **verknüpft** badge.
 | Setting | Default | Description |
 |---|---|---|
 | API Key | — | Your Anthropic API key |
-| Model | Claude Opus 4.5 | Which Claude model to use |
+| Model | `claude-opus-4-6` | Which Claude model to use. Click **Aktualisieren** to fetch the live model list from the Anthropic API. |
 | Max tokens | 8192 | Maximum output tokens per response |
 | Max context notes | 6 | How many notes to retrieve per query |
 | Max chars per note | 2500 | How much of each note to include |
@@ -119,11 +118,20 @@ Notes explicitly linked via frontmatter are marked with a **verknüpft** badge.
 
 | Setting | Default | Description |
 |---|---|---|
-| Use embeddings | off | Enable local semantic search instead of TF-IDF |
+| Use embeddings | off | Enable hybrid search (TF-IDF + semantic, merged via RRF) |
 | Embedding model | BGE Micro v2 | ONNX model for local inference |
 | Exclude folders | — | Vault folders skipped during embedding |
 
-When enabled, embeddings are computed locally (no API call) and cached in `<vault>/.memex-chat/embeddings/`. The model (~22 MB) is downloaded once to `<vault>/.memex-chat/models/`. Indexing progress is shown as an Obsidian notice. Obsidian Sync activity is detected automatically — indexing waits until sync is idle before starting.
+| Model | Notes |
+|---|---|
+| `TaylorAI/bge-micro-v2` | Default — fastest, 384-dim |
+| `Xenova/all-MiniLM-L6-v2` | 384-dim |
+| `Xenova/multilingual-e5-small` | German + English |
+| `Xenova/paraphrase-multilingual-MiniLM-L12-v2` | German + English, larger |
+
+Embeddings are computed locally (no API call) and cached in `<vault>/.memex-chat/embeddings/`. The model (~22 MB) is downloaded once to `<vault>/.memex-chat/models/`. Indexing progress is shown as an Obsidian notice. Obsidian Sync activity is detected automatically — indexing waits until sync is idle before starting.
+
+Once indexing completes, context retrieval switches to **hybrid mode**: TF-IDF and semantic results are fetched independently then rank-merged via Reciprocal Rank Fusion. Notes that score well in both engines rise to the top; notes found by only one are still included if their rank is strong enough. This catches paraphrased queries that TF-IDF misses and avoids the over-broadness of embeddings alone.
 
 ## License
 

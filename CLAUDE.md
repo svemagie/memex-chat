@@ -118,4 +118,25 @@ Copy `main.js`, `manifest.json`, `styles.css` into `.obsidian/plugins/memex-chat
 
 ## Models (SettingsTab.ts)
 
-Default: `claude-opus-4-6`. Update `MODELS` array and `DEFAULT_SETTINGS.model` when adding new model IDs.
+Static `MODELS` array (fallback / initial dropdown population):
+
+| ID | Label |
+|---|---|
+| `claude-opus-4-6` | Claude Opus 4.6 (Stärkste) |
+| `claude-sonnet-4-6` | Claude Sonnet 4.6 (Empfohlen) |
+| `claude-haiku-4-5-20251001` | Claude Haiku 4.5 (Schnell) |
+
+Default: `claude-opus-4-6`.
+
+**"Aktualisieren" button**: calls `ClaudeClient.fetchModels(apiKey)` to fetch the live model list from the Anthropic API and repopulate the dropdown dynamically. This supersedes the static array at runtime. Update `MODELS` and `DEFAULT_SETTINGS.model` only when changing the compile-time fallback.
+
+## Embedding Models (EmbedSearch.ts)
+
+`EMBEDDING_MODELS` array exported from `EmbedSearch.ts` and used to populate the embedding model dropdown in settings:
+
+| ID | Description |
+|---|---|
+| `TaylorAI/bge-micro-v2` | BGE Micro v2 — default, 384-dim, fastest |
+| `Xenova/all-MiniLM-L6-v2` | MiniLM L6 v2 — 384-dim |
+| `Xenova/multilingual-e5-small` | Multilingual E5 Small — DE/EN |
+| `Xenova/paraphrase-multilingual-MiniLM-L12-v2` | Multilingual MiniLM L12 |

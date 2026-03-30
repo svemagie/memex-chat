@@ -2,6 +2,7 @@ import { Notice, Plugin, TFile } from "obsidian";
 import { ChatView, VIEW_TYPE_MEMEX_CHAT } from "./ChatView";
 import { VaultSearch } from "./VaultSearch";
 import { EmbedSearch } from "./EmbedSearch";
+import { HybridSearch } from "./HybridSearch";
 import { ClaudeClient } from "./ClaudeClient";
 import { MemexChatSettingsTab, MemexChatSettings, DEFAULT_SETTINGS } from "./SettingsTab";
 import { RelatedNotesView, VIEW_TYPE_RELATED } from "./RelatedNotesView";
@@ -15,12 +16,13 @@ export default class MemexChatPlugin extends Plugin {
   settings!: MemexChatSettings;
   search!: VaultSearch;
   embedSearch: EmbedSearch | null = null;
+  hybridSearch: HybridSearch | null = null;
   claude!: ClaudeClient;
   data!: PluginData;
 
-  /** Returns the active search engine: EmbedSearch when enabled, else VaultSearch */
-  get activeSearch(): VaultSearch | EmbedSearch {
-    return this.embedSearch ?? this.search;
+  /** Returns the active search engine: HybridSearch when embeddings are ready, else VaultSearch */
+  get activeSearch(): VaultSearch | HybridSearch {
+    return this.hybridSearch ?? this.search;
   }
 
   async onload(): Promise<void> {
@@ -149,6 +151,7 @@ export default class MemexChatPlugin extends Plugin {
   async initEmbedSearch(): Promise<void> {
     if (!this.settings.useEmbeddings) {
       this.embedSearch = null;
+      this.hybridSearch = null;
       return;
     }
     this.embedSearch = new EmbedSearch(this.app, this.settings.embeddingModel);
@@ -176,6 +179,7 @@ export default class MemexChatPlugin extends Plugin {
     // Wait for Obsidian Sync to finish before starting (avoids embedding stale/partial files)
     this.waitForSyncIdle(notice).then(() => this.embedSearch?.buildIndex())
       .then(() => {
+        if (this.embedSearch) this.hybridSearch = new HybridSearch(this.search, this.embedSearch);
         notice.setMessage(`✓ Memex [${modelShort}]: ${this.app.vault.getMarkdownFiles().length} Notizen eingebettet`);
         setTimeout(() => notice.hide(), 4000);
         this.notifyRelatedView();
@@ -199,6 +203,7 @@ export default class MemexChatPlugin extends Plugin {
 
     if (this.settings.useEmbeddings && this.embedSearch) {
       // Rebuild semantic (embedding) index
+      this.hybridSearch = null;
       this.embedSearch.onModelStatus = (status) => {
         if (view) view.setStatus(status);
       };
@@ -212,6 +217,7 @@ export default class MemexChatPlugin extends Plugin {
         }
       };
       await this.embedSearch.buildIndex();
+      this.hybridSearch = new HybridSearch(this.search, this.embedSearch);
       this.embedSearch.onProgress = undefined;
       this.embedSearch.onModelStatus = undefined;
     } else {
