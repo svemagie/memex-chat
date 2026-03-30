@@ -22,7 +22,7 @@ Entry: `src/main.ts` → bundled to `main.js` via esbuild (CJS, ES2018 target).
 | `src/VaultSearch.ts` | TF-IDF search engine. Builds in-memory index over all vault markdown files. Frontmatter property boost (5×). `findSimilarByName()` for unresolved link hints. Exports `SearchResult` interface (includes optional `linked` field). |
 | `src/EmbedSearch.ts` | Local semantic search via `@xenova/transformers` (ONNX, WASM). Caches per-note `.ajson` vectors under `<vault>/.memex-chat/embeddings/`. `searchSimilarToFile()` boosts scores by frontmatter property links (+0.15) and shared tags (+0.05/tag). |
 | `src/RelatedNotesView.ts` | Sidebar panel — `RelatedNotesView extends ItemView`. Shows semantically similar notes for the active file; refreshes on file-open. Displays similarity bar and "verknüpft" badge for property-linked notes. View type: `memex-related-notes`. |
-| `src/ClaudeClient.ts` | Anthropic API client. `streamChat()` yields `ClaudeStreamChunk` via async generator. Uses Obsidian `requestUrl` (no SDK, bypasses CORS). |
+| `src/ClaudeClient.ts` | Anthropic API client. `streamChat()` yields `ClaudeStreamChunk` via async generator using native `fetch` + SSE. `chat()` and `fetchModels()` use Obsidian `requestUrl` (no SDK). |
 | `src/SettingsTab.ts` | `MemexChatSettingsTab` + `MemexChatSettings` interface + `DEFAULT_SETTINGS`. Exports `PromptButton` interface. Folder autocomplete via `attachFolderDropdown()` helper. |
 | `styles.css` | All plugin styles. CSS classes prefixed `vc-` (e.g. `vc-root`, `vc-msg--assistant`, `vc-related-*`, `vc-folder-*`). |
 | `manifest.json` | Obsidian plugin manifest. ID: `memex-chat`. Version: `1.0.1`. |
@@ -32,7 +32,7 @@ Entry: `src/main.ts` → bundled to `main.js` via esbuild (CJS, ES2018 target).
 ## Key Patterns
 
 - **Data persistence**: `this.saveData(this.data)` / `this.loadData()` — single object `{ settings, threads }`. Settings merge on load preserves new fields via per-entry spread for `promptButtons`.
-- **Streaming**: `ClaudeClient.streamChat()` is an async generator; `ChatView` iterates it and calls `updateLastMessage()` per chunk. (Note: `requestUrl` delivers the full response at once — no true streaming.)
+- **Streaming**: `ClaudeClient.streamChat()` is an async generator using native `fetch` with `stream: true` and SSE parsing (`content_block_delta` events). `ChatView` iterates it and calls `updateLastMessage()` per chunk. `chat()` and `fetchModels()` use `requestUrl` (buffered, fine for non-streaming calls).
 - **Context flow**: Query → `VaultSearch.search()` or `EmbedSearch.search()` → context preview → user confirms → `sendMessage()` injects note content into the Claude prompt. Auto-retrieve skipped when prompt extension buttons are active.
 - **Active search engine**: `plugin.activeSearch` returns `EmbedSearch` when enabled, else `VaultSearch`.
 - **System prompt layering**: base system prompt → optional `systemContextFile` → active `promptButtons` extension files (each appended with `\n\n---\n`).
