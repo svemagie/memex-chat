@@ -1,6 +1,6 @@
 # Memex Chat — CLAUDE.md
 
-Obsidian plugin: Chat with your vault using Claude AI. Semantic TF-IDF + local embedding context retrieval, `@Notizname` mentions, thread history, prompt extension buttons, streaming responses, related notes sidebar.
+Obsidian plugin: Chat with your vault using Claude AI. Hybrid TF-IDF + embedding search (Reciprocal Rank Fusion), MemPalace external knowledge injection, `@Notizname` mentions, thread history, prompt extension buttons, streaming responses, related notes sidebar.
 
 ## Build
 
@@ -21,6 +21,7 @@ Entry: `src/main.ts` → bundled to `main.js` via esbuild (CJS, ES2018 target).
 | `src/ChatView.ts` | Main UI — `ChatView extends ItemView`. Thread management, sidebar history, context preview, mode buttons, streaming render, Copy/Save actions. View type: `memex-chat-view`. |
 | `src/VaultSearch.ts` | TF-IDF search engine. Builds in-memory index over all vault markdown files. Frontmatter property boost (5×). `findSimilarByName()` for unresolved link hints. Exports `SearchResult` interface (includes optional `linked` field). |
 | `src/EmbedSearch.ts` | Local semantic search via `@xenova/transformers` (ONNX, WASM). Caches per-note `.ajson` vectors under `<vault>/.memex-chat/embeddings/`. `searchSimilarToFile()` boosts scores by frontmatter property links (+0.15) and shared tags (+0.05/tag). |
+| `src/HybridSearch.ts` | Combines TF-IDF and embedding search via Reciprocal Rank Fusion (RRF, k=60). Runs both engines in parallel; rank-merges results so neither score space needs normalization. TF-IDF excerpts are preserved in merged output. |
 | `src/RelatedNotesView.ts` | Sidebar panel — `RelatedNotesView extends ItemView`. Shows semantically similar notes for the active file; refreshes on file-open. Displays similarity bar and "verknüpft" badge for property-linked notes. View type: `memex-related-notes`. |
 | `src/ClaudeClient.ts` | Anthropic API client. `streamChat()` yields `ClaudeStreamChunk` via async generator using native `fetch` + SSE. `chat()` and `fetchModels()` use Obsidian `requestUrl` (no SDK). |
 | `src/SettingsTab.ts` | `MemexChatSettingsTab` + `MemexChatSettings` interface + `DEFAULT_SETTINGS`. Exports `PromptButton` interface. Folder autocomplete via `attachFolderDropdown()` helper. |
@@ -33,8 +34,9 @@ Entry: `src/main.ts` → bundled to `main.js` via esbuild (CJS, ES2018 target).
 
 - **Data persistence**: `this.saveData(this.data)` / `this.loadData()` — single object `{ settings, threads }`. Settings merge on load preserves new fields via per-entry spread for `promptButtons`.
 - **Streaming**: `ClaudeClient.streamChat()` is an async generator using native `fetch` with `stream: true` and SSE parsing (`content_block_delta` events). `ChatView` iterates it and calls `updateLastMessage()` per chunk. `chat()` and `fetchModels()` use `requestUrl` (buffered, fine for non-streaming calls).
-- **Context flow**: Query → `VaultSearch.search()` or `EmbedSearch.search()` → context preview → user confirms → `sendMessage()` injects note content into the Claude prompt. Auto-retrieve skipped when prompt extension buttons are active.
-- **Active search engine**: `plugin.activeSearch` returns `EmbedSearch` when enabled, else `VaultSearch`.
+- **Context flow**: Query → `VaultSearch.search()` or `HybridSearch.search()` → context preview → user confirms → `sendMessage()` injects note content into the Claude prompt. If `useMempalace` is enabled, `queryMempalace()` runs first and its results are prepended (highest priority, closest to query). Auto-retrieve skipped when prompt extension buttons are active.
+- **Active search engine**: `plugin.activeSearch` returns `HybridSearch` when embeddings are ready, else `VaultSearch`.
+- **MemPalace context**: `ChatView.queryMempalace(query)` calls `/usr/local/bin/mempalace search <query> --results N` via `execFile` with a 10 s timeout. Returns `""` silently if the binary is absent, errors, or times out. Results are labeled `MemPalace (Wissens-Archiv):` and prepended before vault context.
 - **System prompt layering**: base system prompt → optional `systemContextFile` → active `promptButtons` extension files (each appended with `\n\n---\n`).
 - **@mention syntax**: `@Notizname` — autocomplete triggers after 2 chars, inserts full basename. Parsing in `handleSend` matches vault filenames directly (handles spaces & special chars).
 - **Prompt buttons**: `activeExtensions: Set<string>` tracks active button file paths. Mode hint panel shows `helpText` above input; hidden after send. Date-search buttons parse month from query and filter files by `getFileDate()`.
@@ -60,6 +62,23 @@ Entry: `src/main.ts` → bundled to `main.js` via esbuild (CJS, ES2018 target).
 - `contextProperties: string[]` — frontmatter keys whose wikilink values get +0.15 score boost; shared tags get +0.05 each (max 3). Scores capped at 1.0.
 - Obsidian Sync wait: `waitForSyncIdle()` monitors vault events (5 s probe, 15 s quiet) before starting `buildIndex`.
 - esbuild patches required: `stubNativeModules`, `forceOnnxWeb`, `forceOrtWebBrowserMode`. `import.meta.url` defined as a constant string.
+
+## HybridSearch
+
+- Combines `VaultSearch` (TF-IDF) and `EmbedSearch` (ONNX embeddings) via Reciprocal Rank Fusion.
+- `RRF_K = 60` — standard constant; score = `1/(K + rank_tfidf + 1) + 1/(K + rank_embed + 1)`.
+- Runs both engines in parallel (`Promise.all`), fetches `topK * 3` candidates from each.
+- TF-IDF excerpts preserved in merged output; embedding results fill in where TF-IDF has no match.
+- `plugin.hybridSearch` is set after `embedSearch.buildIndex()` completes; `plugin.activeSearch` returns it over `VaultSearch`.
+
+## MemPalace Integration
+
+- Requires `/usr/local/bin/mempalace` CLI installed on the host machine.
+- `ChatView.queryMempalace(query)`: calls `mempalace search <query> --results N` via Node `execFile`, 10 s timeout.
+- Silent no-op if binary missing, process errors, or stdout empty — never throws.
+- Output section header: `MemPalace (Wissens-Archiv):`, prepended before vault context so it sits closest to the query in the prompt.
+- Controlled by `settings.useMempalace` (toggle) and `settings.mempalaceResults` (1–10, default 3).
+- Status indicator "MemPalace wird abgefragt…" shown during the CLI call.
 
 ## RelatedNotesView
 
@@ -89,6 +108,8 @@ Entry: `src/main.ts` → bundled to `main.js` via esbuild (CJS, ES2018 target).
 | `useEmbeddings` | `false` | Enable local semantic embeddings |
 | `embeddingModel` | `TaylorAI/bge-micro-v2` | ONNX embedding model ID |
 | `embedExcludeFolders` | `[]` | Vault folders excluded from embedding |
+| `useMempalace` | `false` | Inject MemPalace CLI search results as additional context |
+| `mempalaceResults` | `3` | Number of MemPalace results per query (1–10) |
 | `promptButtons` | Draft Check, Monthly Check | Header mode buttons with system prompt extension |
 
 ## Prompt Buttons (PromptButton interface)
