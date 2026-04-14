@@ -33427,7 +33427,14 @@ var RelatedNotesView = class extends import_obsidian4.ItemView {
       useMempalace ? this.queryMempalace(mpQuery, topK, file.basename) : Promise.resolve([]),
       embedReady ? es.searchSimilarToFile(file) : Promise.resolve([])
     ]);
-    this.render(mpResults, nativeResults, file.basename, embedReady ? modelShort : null);
+    const mpNames = new Set(mpResults.map((r) => r.source));
+    const dedupedNative = nativeResults.filter((r) => !mpNames.has(r.file.basename));
+    this.render(
+      this.normalizeScores(mpResults),
+      this.normalizeScores(dedupedNative),
+      file.basename,
+      embedReady ? modelShort : null
+    );
   }
   // ─── MemPalace ────────────────────────────────────────────────────────────
   /** Build a semantic query from the note: title + stripped body (first ~300 chars). */
@@ -33492,7 +33499,24 @@ var RelatedNotesView = class extends import_obsidian4.ItemView {
       const excerpt = afterScore.replace(/\n{3,}/g, "\n\n").trim().slice(0, 240);
       results.push({ source, location, score, excerpt });
     }
-    return results;
+    const seen = /* @__PURE__ */ new Map();
+    for (const r of results) {
+      const existing = seen.get(r.source);
+      if (!existing || r.score > existing.score)
+        seen.set(r.source, r);
+    }
+    return [...seen.values()].sort((a, b) => b.score - a.score);
+  }
+  // ─── Score normalization ──────────────────────────────────────────────────
+  /** Max-normalize scores within a result set so the best item = 1.0.
+   *  Preserves relative proportions; each section independently scaled. */
+  normalizeScores(items) {
+    if (items.length === 0)
+      return items;
+    const max2 = Math.max(...items.map((i) => i.score));
+    if (max2 === 0)
+      return items;
+    return items.map((i) => ({ ...i, score: i.score / max2 }));
   }
   // ─── Rendering ────────────────────────────────────────────────────────────
   renderStatus(msg) {

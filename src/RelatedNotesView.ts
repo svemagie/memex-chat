@@ -64,7 +64,15 @@ export class RelatedNotesView extends ItemView {
       embedReady   ? es!.searchSimilarToFile(file)      : Promise.resolve([]),
     ]);
 
-    this.render(mpResults, nativeResults, file.basename, embedReady ? modelShort : null);
+    const mpNames = new Set(mpResults.map((r) => r.source));
+    const dedupedNative = nativeResults.filter((r) => !mpNames.has(r.file.basename));
+
+    this.render(
+      this.normalizeScores(mpResults),
+      this.normalizeScores(dedupedNative),
+      file.basename,
+      embedReady ? modelShort : null,
+    );
   }
 
   // ─── MemPalace ────────────────────────────────────────────────────────────
@@ -136,7 +144,25 @@ export class RelatedNotesView extends ItemView {
 
       results.push({ source, location, score, excerpt });
     }
-    return results;
+
+    // Deduplicate by source, keeping highest-scoring entry
+    const seen = new Map<string, MpResult>();
+    for (const r of results) {
+      const existing = seen.get(r.source);
+      if (!existing || r.score > existing.score) seen.set(r.source, r);
+    }
+    return [...seen.values()].sort((a, b) => b.score - a.score);
+  }
+
+  // ─── Score normalization ──────────────────────────────────────────────────
+
+  /** Max-normalize scores within a result set so the best item = 1.0.
+   *  Preserves relative proportions; each section independently scaled. */
+  private normalizeScores<T extends { score: number }>(items: T[]): T[] {
+    if (items.length === 0) return items;
+    const max = Math.max(...items.map((i) => i.score));
+    if (max === 0) return items;
+    return items.map((i) => ({ ...i, score: i.score / max }));
   }
 
   // ─── Rendering ────────────────────────────────────────────────────────────
