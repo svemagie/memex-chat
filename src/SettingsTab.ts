@@ -68,7 +68,7 @@ Wenn du Fragen beantwortest:
       label: "Monthly Check",
       filePath: "Schreibdenken/ferals/Code/Prompts/MONTHLY COHERENCE AUDIT",
       searchMode: "date",
-      searchFolders: ["Schreibdenken/ferals/Content/Artikel"],
+      searchFolders: ["Schreibdenken/ferals/Content/Artikel", "Schreibdenken/ferals/Content/Newsletter", "Schreibdenken/ferals/Content/Artikel Draft"],
     },
   ],
 };
