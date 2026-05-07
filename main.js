@@ -31319,8 +31319,8 @@ var ChatView = class extends import_obsidian.ItemView {
     const query = this.inputEl.value.trim();
     if (!query || this.isLoading)
       return;
-    if (!this.plugin.settings.apiKey) {
-      this.setStatus("\u26A0 Bitte API Key in den Einstellungen eingeben");
+    if (!this.plugin.settings.apiKey && !this.plugin.settings.useSubscriptionBilling) {
+      this.setStatus("\u26A0 Bitte API Key in den Einstellungen eingeben (oder Claude Abo aktivieren)");
       return;
     }
     const mentions = [];
@@ -31479,7 +31479,9 @@ ${content}`;
         apiKey: this.plugin.settings.apiKey,
         model: this.plugin.settings.model,
         maxTokens: this.plugin.settings.maxTokens,
-        systemPrompt
+        systemPrompt,
+        useSubscriptionBilling: this.plugin.settings.useSubscriptionBilling,
+        claudeCLIPath: this.plugin.settings.claudeCLIPath
       });
       for await (const chunk of stream) {
         if (chunk.type === "text" && chunk.text) {
@@ -32748,6 +32750,7 @@ var HybridSearch = class {
 // src/ClaudeClient.ts
 var import_obsidian2 = require("obsidian");
 var https = __toESM(require("https"));
+var import_child_process = require("child_process");
 var ClaudeClient = class {
   constructor() {
     this.baseUrl = "https://api.anthropic.com/v1/messages";
@@ -32760,11 +32763,98 @@ var ClaudeClient = class {
     };
   }
   /**
+   * Stream via claude CLI using OAuth keychain billing.
+   * Both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN are deleted from env so the CLI
+   * falls back to the keychain OAuth token → subscription billing.
+   */
+  async *streamChatCLI(messages, options) {
+    if (messages.length === 0) {
+      yield { type: "done" };
+      return;
+    }
+    const history = messages.slice(0, -1);
+    const lastMessage = messages[messages.length - 1];
+    let prompt = "";
+    if (history.length > 0) {
+      prompt += "Bisheriges Gespr\xE4ch:\n";
+      for (const m of history) {
+        prompt += `${m.role === "user" ? "User" : "Assistant"}: ${m.content}
+`;
+      }
+      prompt += "\n";
+    }
+    prompt += lastMessage.content;
+    const cliPath = options.claudeCLIPath ?? "/usr/local/bin/claude";
+    const args = [
+      "--print",
+      "--model",
+      options.model,
+      "--output-format",
+      "text",
+      "--setting-sources",
+      "",
+      "--tools",
+      "",
+      "--system-prompt",
+      options.systemPrompt
+    ];
+    const env3 = { ...process.env };
+    delete env3.ANTHROPIC_API_KEY;
+    delete env3.ANTHROPIC_AUTH_TOKEN;
+    const queue = [];
+    let done = false;
+    let wakeup = null;
+    const push = (c) => {
+      queue.push(c);
+      wakeup?.();
+      wakeup = null;
+    };
+    const finish = () => {
+      done = true;
+      wakeup?.();
+      wakeup = null;
+    };
+    const child = (0, import_child_process.spawn)(cliPath, args, { env: env3, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdout.on("data", (chunk) => {
+      push({ type: "text", text: chunk.toString() });
+    });
+    child.stderr.on("data", () => {
+    });
+    child.on("error", (err) => {
+      push({ type: "error", error: `claude CLI error: ${err.message}` });
+      finish();
+    });
+    child.on("close", (code) => {
+      if (code !== 0 && code !== null && queue.every((c) => c.type !== "text")) {
+        push({ type: "error", error: `claude CLI exited with code ${code}` });
+      }
+      finish();
+    });
+    child.stdin.write(prompt);
+    child.stdin.end();
+    while (true) {
+      while (queue.length)
+        yield queue.shift();
+      if (done)
+        break;
+      await new Promise((r) => {
+        wakeup = r;
+      });
+    }
+    while (queue.length)
+      yield queue.shift();
+    yield { type: "done" };
+  }
+  /**
    * Stream a chat completion via Node.js https + SSE, yielding text chunks as they arrive.
    * Uses the Node.js https module (available in Obsidian's Electron renderer via Node integration)
    * to bypass Electron's CORS/CSP restrictions that block fetch and XHR to external APIs.
    */
   async *streamChat(messages, options) {
+    if (options.useSubscriptionBilling) {
+      yield* this.streamChatCLI(messages, options);
+      return;
+    }
     const queue = [];
     let done = false;
     let wakeup = null;
@@ -32926,6 +33016,8 @@ Wenn du Fragen beantwortest:
   embedExcludeFolders: [],
   useMempalace: false,
   mempalaceResults: 3,
+  useSubscriptionBilling: false,
+  claudeCLIPath: "/usr/local/bin/claude",
   promptButtons: [
     {
       label: "Draft Check",
@@ -32936,7 +33028,7 @@ Wenn du Fragen beantwortest:
       label: "Monthly Check",
       filePath: "Schreibdenken/ferals/Code/Prompts/MONTHLY COHERENCE AUDIT",
       searchMode: "date",
-      searchFolders: ["Schreibdenken/ferals/Content/Artikel"]
+      searchFolders: ["Schreibdenken/ferals/Content/Artikel", "Schreibdenken/ferals/Content/Newsletter", "Schreibdenken/ferals/Content/Artikel Draft"]
     }
   ]
 };
@@ -32994,15 +33086,25 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
       cls: "setting-item-description"
     });
     containerEl.createEl("h3", { text: "Claude API" });
-    new import_obsidian3.Setting(containerEl).setName("API Key").setDesc("Dein Anthropic API Key (sk-ant-...)").addText(
+    new import_obsidian3.Setting(containerEl).setName("Claude Abo verwenden").setDesc("Claude CLI + OAuth statt API Key nutzen (nur Desktop, ben\xF6tigt claude im PATH)").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.useSubscriptionBilling).onChange(async (value) => {
+        this.plugin.settings.useSubscriptionBilling = value;
+        await this.plugin.saveSettings();
+        this.display();
+      })
+    );
+    const apiKeySetting = new import_obsidian3.Setting(containerEl).setName("API Key").setDesc("Dein Anthropic API Key (sk-ant-...)").addText(
       (text) => text.setPlaceholder("sk-ant-api03-...").setValue(this.plugin.settings.apiKey).onChange(async (value) => {
         this.plugin.settings.apiKey = value.trim();
         await this.plugin.saveSettings();
       })
     );
+    if (this.plugin.settings.useSubscriptionBilling) {
+      apiKeySetting.settingEl.style.display = "none";
+    }
     let modelDrop;
     let refreshBtn;
-    new import_obsidian3.Setting(containerEl).setName("Modell").setDesc("Welches Claude-Modell verwenden? (Aktualisieren zeigt Roh-IDs)").addDropdown((drop) => {
+    const modelSetting = new import_obsidian3.Setting(containerEl).setName("Modell").setDesc("Welches Claude-Modell verwenden? (Aktualisieren zeigt Roh-IDs)").addDropdown((drop) => {
       modelDrop = drop;
       for (const m of MODELS)
         drop.addOption(m.id, m.name);
@@ -33010,28 +33112,39 @@ var MemexChatSettingsTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.model = value;
         await this.plugin.saveSettings();
       });
-    }).addButton((btn) => {
-      refreshBtn = btn;
-      btn.setButtonText("Aktualisieren").onClick(async () => {
-        const prev = modelDrop.getValue();
-        refreshBtn.setDisabled(true);
-        refreshBtn.setButtonText("...");
-        try {
-          const models = await this.plugin.claude.fetchModels(this.plugin.settings.apiKey);
-          modelDrop.selectEl.empty();
-          for (const m of models)
-            modelDrop.addOption(m.id, m.name);
-          modelDrop.setValue(prev);
-          this.plugin.settings.model = modelDrop.getValue();
-          await this.plugin.saveSettings();
-        } catch (err) {
-          new import_obsidian3.Notice("Modelle konnten nicht geladen werden: " + err.message);
-        } finally {
-          refreshBtn.setDisabled(false);
-          refreshBtn.setButtonText("Aktualisieren");
-        }
-      });
     });
+    if (!this.plugin.settings.useSubscriptionBilling) {
+      modelSetting.addButton((btn) => {
+        refreshBtn = btn;
+        btn.setButtonText("Aktualisieren").onClick(async () => {
+          const prev = modelDrop.getValue();
+          refreshBtn.setDisabled(true);
+          refreshBtn.setButtonText("...");
+          try {
+            const models = await this.plugin.claude.fetchModels(this.plugin.settings.apiKey);
+            modelDrop.selectEl.empty();
+            for (const m of models)
+              modelDrop.addOption(m.id, m.name);
+            modelDrop.setValue(prev);
+            this.plugin.settings.model = modelDrop.getValue();
+            await this.plugin.saveSettings();
+          } catch (err) {
+            new import_obsidian3.Notice("Modelle konnten nicht geladen werden: " + err.message);
+          } finally {
+            refreshBtn.setDisabled(false);
+            refreshBtn.setButtonText("Aktualisieren");
+          }
+        });
+      });
+    }
+    if (this.plugin.settings.useSubscriptionBilling) {
+      new import_obsidian3.Setting(containerEl).setName("Claude CLI Pfad").setDesc("Pfad zur claude-Binary (z.B. /usr/local/bin/claude). Nur Desktop.").addText(
+        (text) => text.setPlaceholder("/usr/local/bin/claude").setValue(this.plugin.settings.claudeCLIPath).onChange(async (value) => {
+          this.plugin.settings.claudeCLIPath = value.trim() || "/usr/local/bin/claude";
+          await this.plugin.saveSettings();
+        })
+      );
+    }
     new import_obsidian3.Setting(containerEl).setName("Max. Antwort-Tokens").setDesc("Maximale L\xE4nge der Claude-Antwort. F\xFCr lange Analysen (z.B. Monthly Check) h\xF6her einstellen. (1024\u201316000)").addSlider(
       (slider) => slider.setLimits(1024, 16e3, 512).setValue(this.plugin.settings.maxTokens).setDynamicTooltip().onChange(async (value) => {
         this.plugin.settings.maxTokens = value;

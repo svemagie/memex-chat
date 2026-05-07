@@ -30,6 +30,8 @@ export interface MemexChatSettings {
   embedExcludeFolders: string[];  // vault folders to skip during embedding
   useMempalace: boolean;          // inject MemPalace search results as additional context
   mempalaceResults: number;       // number of MemPalace results to include
+  useSubscriptionBilling: boolean; // use claude CLI + OAuth keychain instead of API key
+  claudeCLIPath: string;           // path to claude binary
 }
 
 export const DEFAULT_SETTINGS: MemexChatSettings = {
@@ -58,6 +60,8 @@ Wenn du Fragen beantwortest:
   embedExcludeFolders: [],
   useMempalace: false,
   mempalaceResults: 3,
+  useSubscriptionBilling: false,
+  claudeCLIPath: "/usr/local/bin/claude",
   promptButtons: [
     {
       label: "Draft Check",
@@ -139,7 +143,20 @@ export class MemexChatSettingsTab extends PluginSettingTab {
     // --- API ---
     containerEl.createEl("h3", { text: "Claude API" });
 
+    // Subscription billing toggle
     new Setting(containerEl)
+      .setName("Claude Abo verwenden")
+      .setDesc("Claude CLI + OAuth statt API Key nutzen (nur Desktop, benötigt claude im PATH)")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.useSubscriptionBilling).onChange(async (value) => {
+          this.plugin.settings.useSubscriptionBilling = value;
+          await this.plugin.saveSettings();
+          this.display(); // re-render to show/hide API key field
+        })
+      );
+
+    // API key field — hidden when subscription billing is active
+    const apiKeySetting = new Setting(containerEl)
       .setName("API Key")
       .setDesc("Dein Anthropic API Key (sk-ant-...)")
       .addText((text) =>
@@ -151,11 +168,14 @@ export class MemexChatSettingsTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+    if (this.plugin.settings.useSubscriptionBilling) {
+      apiKeySetting.settingEl.style.display = "none";
+    }
 
     let modelDrop: DropdownComponent;
     let refreshBtn: ButtonComponent;
 
-    new Setting(containerEl)
+    const modelSetting = new Setting(containerEl)
       .setName("Modell")
       .setDesc("Welches Claude-Modell verwenden? (Aktualisieren zeigt Roh-IDs)")
       .addDropdown((drop) => {
@@ -165,8 +185,10 @@ export class MemexChatSettingsTab extends PluginSettingTab {
           this.plugin.settings.model = value;
           await this.plugin.saveSettings();
         });
-      })
-      .addButton((btn) => {
+      });
+
+    if (!this.plugin.settings.useSubscriptionBilling) {
+      modelSetting.addButton((btn) => {
         refreshBtn = btn;
         btn.setButtonText("Aktualisieren").onClick(async () => {
           const prev = modelDrop.getValue();
@@ -187,6 +209,23 @@ export class MemexChatSettingsTab extends PluginSettingTab {
           }
         });
       });
+    }
+
+    // CLI path — visible only in subscription billing mode
+    if (this.plugin.settings.useSubscriptionBilling) {
+      new Setting(containerEl)
+        .setName("Claude CLI Pfad")
+        .setDesc("Pfad zur claude-Binary (z.B. /usr/local/bin/claude). Nur Desktop.")
+        .addText((text) =>
+          text
+            .setPlaceholder("/usr/local/bin/claude")
+            .setValue(this.plugin.settings.claudeCLIPath)
+            .onChange(async (value) => {
+              this.plugin.settings.claudeCLIPath = value.trim() || "/usr/local/bin/claude";
+              await this.plugin.saveSettings();
+            })
+        );
+    }
 
     new Setting(containerEl)
       .setName("Max. Antwort-Tokens")

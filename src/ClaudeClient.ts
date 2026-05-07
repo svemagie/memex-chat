@@ -1,5 +1,6 @@
 import { requestUrl } from "obsidian";
 import * as https from "https";
+import { spawn } from "child_process";
 
 export interface ClaudeMessage {
   role: "user" | "assistant";
@@ -11,6 +12,8 @@ export interface ClaudeOptions {
   model: string;
   maxTokens?: number;
   systemPrompt: string;
+  useSubscriptionBilling?: boolean;
+  claudeCLIPath?: string;
 }
 
 export interface ClaudeStreamChunk {
@@ -32,6 +35,85 @@ export class ClaudeClient {
   }
 
   /**
+   * Stream via claude CLI using OAuth keychain billing.
+   * Both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN are deleted from env so the CLI
+   * falls back to the keychain OAuth token → subscription billing.
+   */
+  private async *streamChatCLI(
+    messages: ClaudeMessage[],
+    options: ClaudeOptions
+  ): AsyncGenerator<ClaudeStreamChunk> {
+    if (messages.length === 0) {
+      yield { type: "done" };
+      return;
+    }
+
+    // Build the prompt: history + current user message
+    const history = messages.slice(0, -1);
+    const lastMessage = messages[messages.length - 1];
+    let prompt = "";
+    if (history.length > 0) {
+      prompt += "Bisheriges Gespräch:\n";
+      for (const m of history) {
+        prompt += `${m.role === "user" ? "User" : "Assistant"}: ${m.content}\n`;
+      }
+      prompt += "\n";
+    }
+    prompt += lastMessage.content;
+
+    const cliPath = options.claudeCLIPath ?? "/usr/local/bin/claude";
+    const args = [
+      "--print",
+      "--model", options.model,
+      "--output-format", "text",
+      "--setting-sources", "",
+      "--tools", "",
+      "--system-prompt", options.systemPrompt,
+    ];
+
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+    delete env.ANTHROPIC_AUTH_TOKEN;
+
+    const queue: ClaudeStreamChunk[] = [];
+    let done = false;
+    let wakeup: (() => void) | null = null;
+    const push = (c: ClaudeStreamChunk) => { queue.push(c); wakeup?.(); wakeup = null; };
+    const finish = () => { done = true; wakeup?.(); wakeup = null; };
+
+    const child = spawn(cliPath, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      push({ type: "text", text: chunk.toString() });
+    });
+
+    child.stderr.on("data", () => { /* discard stderr */ });
+
+    child.on("error", (err: Error) => {
+      push({ type: "error", error: `claude CLI error: ${err.message}` });
+      finish();
+    });
+
+    child.on("close", (code: number | null) => {
+      if (code !== 0 && code !== null && queue.every(c => c.type !== "text")) {
+        push({ type: "error", error: `claude CLI exited with code ${code}` });
+      }
+      finish();
+    });
+
+    child.stdin.write(prompt);
+    child.stdin.end();
+
+    while (true) {
+      while (queue.length) yield queue.shift()!;
+      if (done) break;
+      await new Promise<void>(r => { wakeup = r; });
+    }
+    while (queue.length) yield queue.shift()!;
+    yield { type: "done" };
+  }
+
+  /**
    * Stream a chat completion via Node.js https + SSE, yielding text chunks as they arrive.
    * Uses the Node.js https module (available in Obsidian's Electron renderer via Node integration)
    * to bypass Electron's CORS/CSP restrictions that block fetch and XHR to external APIs.
@@ -40,6 +122,10 @@ export class ClaudeClient {
     messages: ClaudeMessage[],
     options: ClaudeOptions
   ): AsyncGenerator<ClaudeStreamChunk> {
+    if (options.useSubscriptionBilling) {
+      yield* this.streamChatCLI(messages, options);
+      return;
+    }
     const queue: ClaudeStreamChunk[] = [];
     let done = false;
     let wakeup: (() => void) | null = null;

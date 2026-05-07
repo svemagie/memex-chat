@@ -256,8 +256,8 @@ export class ChatView extends ItemView {
     const query = this.inputEl.value.trim();
     if (!query || this.isLoading) return;
 
-    if (!this.plugin.settings.apiKey) {
-      this.setStatus("⚠ Bitte API Key in den Einstellungen eingeben");
+    if (!this.plugin.settings.apiKey && !this.plugin.settings.useSubscriptionBilling) {
+      this.setStatus("⚠ Bitte API Key in den Einstellungen eingeben (oder Claude Abo aktivieren)");
       return;
     }
 
@@ -458,6 +458,8 @@ export class ChatView extends ItemView {
         model: this.plugin.settings.model,
         maxTokens: this.plugin.settings.maxTokens,
         systemPrompt,
+        useSubscriptionBilling: this.plugin.settings.useSubscriptionBilling,
+        claudeCLIPath: this.plugin.settings.claudeCLIPath,
       });
 
       for await (const chunk of stream) {
